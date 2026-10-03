@@ -1,0 +1,31 @@
+{
+  "name": "cocos-web-inspector-mcp",
+  "version": "0.1.0",
+  "description": "Read-only MCP inspector for Cocos Creator 3.x running in local Chromium",
+  "type": "module",
+  "bin": {
+    "cocos-web-inspector-mcp": "dist/src/index.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/test/self-test.js",
+    "start": "node dist/src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "playwright-core": "^1.63.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "typescript": "^7.0.2"
+  }
+}
