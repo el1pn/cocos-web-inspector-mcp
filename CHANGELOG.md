@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.4
+
+### Fixed
+
+- Preserve production fixture bytes and parse its UTF-8 BOM checksum manifest on Linux CI.
+
 ## 0.1.3
 
 ### Fixed

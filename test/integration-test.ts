@@ -73,7 +73,7 @@ async function verifyProductionFixture(): Promise<void> {
     checksumAlgorithm: 'SHA256',
     checksumExclusions: ['**/*.map', 'manual-check.png'],
   });
-  const expected = new Map((await readFile(join(productionFixtureRoot, 'build-production-checksums.sha256'), 'utf8')).trim().split(/\r?\n/).map(line => [line.slice(66), line.slice(0, 64)]));
+  const expected = new Map((await readFile(join(productionFixtureRoot, 'build-production-checksums.sha256'), 'utf8')).replace(/^﻿/, '').trim().split(/\r?\n/).map(line => [line.slice(66), line.slice(0, 64)]));
   const files = (await fixtureFiles(productionFixtureRoot)).filter(file => !['README.md', 'COCOS-ENGINE-LICENSE.md', 'build-production.json', 'build-production-checksums.sha256', 'fixture-production-provenance.json'].includes(file));
   assert.deepEqual(files, [...expected.keys()].sort());
   for (const file of files) assert.equal(createHash('sha256').update(await readFile(join(productionFixtureRoot, file))).digest('hex'), expected.get(file), file);
