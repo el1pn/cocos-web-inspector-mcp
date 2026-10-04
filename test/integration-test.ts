@@ -114,7 +114,7 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
   const profileRoot = await mkdtemp(join(tmpdir(), 'cocos-web-inspector-live-'));
   let launched: { browser: Browser; context: BrowserContext } | undefined;
   const browserConnection = new BrowserConnection(`http://127.0.0.1:${cdpPort}`);
-  const server = createServer(browserConnection);
+  const server = createServer(browserConnection, { allowRuntimeMutation: true });
   const client = new Client({ name: 'integration-test', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
@@ -124,6 +124,20 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
     await page.goto(pageUrl);
     await waitForFixture(page);
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const pages = await call(client, 'cocos_list_pages', {});
+    assert.equal(pages.pages.length, 1);
+    assert.deepEqual(pages.pages[0].cocos, { detected: true, version: '3.8.8', sceneName: 'InspectorTest' });
+    assert.equal(pages.pages[0].url, pageUrl);
+
+    const runtime = await call(client, 'cocos_runtime_info', { pageUrl });
+    assert.deepEqual(runtime.scene.name, 'InspectorTest');
+    assert.ok(runtime.nodeCount >= 6);
+    const diagnostics = await call(client, 'cocos_runtime_diagnostics', { pageUrl });
+    assert.ok(diagnostics.nodeCount >= 6);
+    assert.ok(diagnostics.componentCount >= 1);
+    assert.ok(diagnostics.maxHierarchyDepth >= 1);
+    assert.equal(diagnostics.unavailableMetrics.drawCalls, 'UNSUPPORTED_PUBLIC_API');
 
     const tree = await call(client, 'cocos_scene_tree', { pageUrl, maxDepth: 6, maxNodes: 50 });
     assert.equal(tree.version, '3.8.8');
@@ -135,15 +149,53 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
     assert.equal(found.matches.length, 1);
     const panelUuid = found.matches[0].uuid as string;
     assert.ok(panelUuid);
+    assert.deepEqual(await call(client, 'cocos_set_node_active', { pageUrl, uuid: panelUuid, active: false }), {
+      changed: true,
+      target: { nodeUuid: panelUuid },
+      before: { active: true },
+      after: { active: false },
+      runtimeOnly: true,
+    });
+    assert.equal((await call(client, 'cocos_find_node', { pageUrl, uuid: panelUuid })).matches[0].active, false);
+    assert.deepEqual(await call(client, 'cocos_set_node_active', { pageUrl, uuid: panelUuid, active: true }), {
+      changed: true,
+      target: { nodeUuid: panelUuid },
+      before: { active: false },
+      after: { active: true },
+      runtimeOnly: true,
+    });
 
+    const context = await call(client, 'cocos_get_node', { pageUrl, uuid: panelUuid });
+    assert.equal(context.node.path, '/InspectorTest/Canvas/Panel');
+    const snapshot = await call(client, 'cocos_snapshot_subtree', { pageUrl, uuid: panelUuid, maxDepth: 2, maxNodes: 20 });
+    assert.equal(snapshot.rootUuid, panelUuid);
+    assert.equal(snapshot.snapshot.uuid, panelUuid);
+    const bounds = await call(client, 'cocos_get_node_bounds', { pageUrl, uuid: panelUuid });
+    assert.equal(bounds.available, true);
+    assert.ok(bounds.visible);
+    assert.ok(bounds.viewport.width > 0 && bounds.viewport.height > 0);
+    const capture = await call(client, 'cocos_capture_node', { pageUrl, uuid: panelUuid });
+    assert.equal(capture.captured, true);
+    assert.equal(capture.mimeType, 'image/png');
+    assert.ok(capture.data.length > 0);
+    assert.equal(context.parent.name, 'Canvas');
+    const filtered = await call(client, 'cocos_find_node', { pageUrl, nameContains: 'Pan', componentType: 'InspectorFixture', active: true, pathPrefix: '/InspectorTest' });
+    assert.equal(filtered.matches[0].uuid, panelUuid);
     const components = await call(client, 'cocos_get_components', { pageUrl, uuid: panelUuid });
     assert.deepEqual(components.components.map((component: { type: string }) => component.type), ['UITransform', 'InspectorFixture']);
+    const fixtureComponentUuid = components.components.find((component: { type: string }) => component.type === 'InspectorFixture')?.uuid;
+    assert.ok(fixtureComponentUuid);
+    const transform = await call(client, 'cocos_set_transform', { pageUrl, uuid: panelUuid, position: { x: 10, y: 20, z: 0 } });
+    assert.deepEqual(transform.after, { position: { x: 10, y: 20, z: 0 } });
+    assert.deepEqual((await call(client, 'cocos_set_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', value: 7 })).after, { value: 7 });
 
-    const properties = await call(client, 'cocos_get_properties', { pageUrl, uuid: panelUuid, componentType: 'InspectorFixture', maxDepth: 3 });
+    const properties = await call(client, 'cocos_get_properties', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, maxDepth: 3 });
     assert.equal(properties.properties.title, 'Inspector fixture');
-    assert.equal(properties.properties.count, 42);
+    assert.equal(properties.properties.count, 7);
     assert.equal(properties.properties.featureEnabled, true);
     assert.equal(properties.properties.details.category, 'manual-test');
+    assert.equal((await call(client, 'cocos_pause', { pageUrl })).after.paused, true);
+    assert.equal((await call(client, 'cocos_resume', { pageUrl })).after.paused, false);
     assert.equal(JSON.stringify(properties).includes('must-not-be-returned'), false);
     assert.equal(JSON.stringify(properties).includes('Property getter was invoked'), false);
 
@@ -159,9 +211,18 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
     const secondPage = await launched.context.newPage();
     await secondPage.goto(`${pageUrl}?second=1`);
     await waitForFixture(secondPage);
+    const listedPages = await call(client, 'cocos_list_pages', {});
+    assert.equal(listedPages.pages.length, 2);
+    assert.ok(listedPages.pages.every((item: { url: string }) => !item.url.includes('?')));
     const ambiguous = await client.callTool({ name: 'cocos_scene_tree', arguments: {} });
     assert.equal(ambiguous.isError, true);
-    assert.match(JSON.stringify(ambiguous.content), /Multiple localhost pages found/);
+    assert.deepEqual(ambiguous.structuredContent, {
+      code: 'MULTIPLE_PAGES',
+      message: `Multiple localhost pages found; pass pageUrl: ${pageUrl}, ${pageUrl}`,
+    });
+    const missing = await client.callTool({ name: 'cocos_runtime_info', arguments: { pageUrl: `http://127.0.0.1:${fixturePort}/missing` } });
+    assert.equal(missing.isError, true);
+    assert.deepEqual(missing.structuredContent, { code: 'PAGE_NOT_FOUND', message: `Local page not found: http://127.0.0.1:${fixturePort}/missing` });
     assert.equal((await call(client, 'cocos_scene_tree', { pageUrl })).scene.name, 'InspectorTest');
 
     await launched.context.close();

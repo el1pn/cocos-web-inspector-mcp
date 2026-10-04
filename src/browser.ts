@@ -3,6 +3,27 @@ import { chromium, type Browser, type Page } from 'playwright-core';
 const LOOPBACK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const PAGE_PROTOCOLS = new Set(['http:', 'https:']);
 
+export type InspectorErrorCode =
+  | 'CDP_UNAVAILABLE'
+  | 'NO_LOCAL_PAGE'
+  | 'MULTIPLE_PAGES'
+  | 'PAGE_NOT_FOUND'
+  | 'COCOS_NOT_FOUND'
+  | 'SCENE_NOT_READY'
+  | 'NODE_NOT_FOUND'
+  | 'COMPONENT_NOT_FOUND'
+  | 'AMBIGUOUS_COMPONENT'
+  | 'MUTATION_DISABLED'
+  | 'INVALID_MUTATION'
+  | 'OUTPUT_TRUNCATED';
+
+export class InspectorError extends Error {
+  constructor(readonly code: InspectorErrorCode, message: string) {
+    super(message);
+    this.name = 'InspectorError';
+  }
+}
+
 function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost') || host === '::1') return true;
@@ -52,11 +73,11 @@ export class BrowserConnection {
     validateLocalUrl(endpoint);
   }
 
-  async page(pageUrl?: string): Promise<Page> {
+  async pages(): Promise<Page[]> {
     if (this.#closed) throw new Error('Browser connection is closed');
     const browser = await this.#connect();
     if (this.#closed) throw new Error('Browser connection is closed');
-    const pages = browser.contexts().flatMap(context => context.pages()).filter(candidate => {
+    return browser.contexts().flatMap(context => context.pages()).filter(candidate => {
       try {
         validateLocalUrl(candidate.url(), true);
         return true;
@@ -64,18 +85,21 @@ export class BrowserConnection {
         return false;
       }
     });
+  }
 
+  async page(pageUrl?: string): Promise<Page> {
+    const pages = await this.pages();
     if (pageUrl) {
       const wanted = validateLocalUrl(pageUrl, true).href;
       const selected = pages.filter(candidate => new URL(candidate.url()).href === wanted);
-      if (selected.length === 0) throw new Error(`Local page not found: ${sanitizeUrl(pageUrl)}`);
-      if (selected.length > 1) throw new Error(`Multiple localhost pages match pageUrl: ${sanitizeUrl(pageUrl)}`);
+      if (selected.length === 0) throw new InspectorError('PAGE_NOT_FOUND', `Local page not found: ${sanitizeUrl(pageUrl)}`);
+      if (selected.length > 1) throw new InspectorError('MULTIPLE_PAGES', `Multiple localhost pages match pageUrl: ${sanitizeUrl(pageUrl)}`);
       return selected[0]!;
     }
-    if (pages.length === 0) throw new Error('No localhost page is attached to Chromium');
+    if (pages.length === 0) throw new InspectorError('NO_LOCAL_PAGE', 'No localhost page is attached to Chromium');
     if (pages.length > 1) {
       const choices = pages.slice(0, 10).map(candidate => sanitizeUrl(candidate.url())).join(', ');
-      throw new Error(`Multiple localhost pages found; pass pageUrl: ${choices}`);
+      throw new InspectorError('MULTIPLE_PAGES', `Multiple localhost pages found; pass pageUrl: ${choices}`);
     }
     return pages[0]!;
   }
@@ -105,6 +129,9 @@ export class BrowserConnection {
         if (this.#browser === browser) this.#browser = undefined;
       });
       return browser;
+    }).catch(error => {
+      if (error instanceof InspectorError || error instanceof Error && error.message === 'connect failed') throw error;
+      throw new InspectorError('CDP_UNAVAILABLE', `Unable to connect to Chromium CDP: ${error instanceof Error ? error.message : 'unknown error'}`);
     });
     this.#connecting = connecting;
     try {

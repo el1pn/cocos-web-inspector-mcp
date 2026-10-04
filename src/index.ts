@@ -3,21 +3,30 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { BrowserConnection } from './browser.js';
 import { createServer } from './server.js';
 
-function endpointFromArgs(args: string[]): string {
-  const index = args.indexOf('--cdp-endpoint');
-  if (index !== -1) {
-    const value = args[index + 1];
-    if (!value) throw new Error('--cdp-endpoint requires a value');
-    return value;
+function optionsFromArgs(args: string[]): { endpoint: string; allowRuntimeMutation: boolean } {
+  let endpoint = process.env.COCOS_CDP_ENDPOINT ?? 'http://127.0.0.1:9222';
+  let allowRuntimeMutation = false;
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if (arg === '--allow-runtime-mutation') {
+      allowRuntimeMutation = true;
+      continue;
+    }
+    if (arg === '--cdp-endpoint') {
+      const value = args[++index];
+      if (!value) throw new Error('--cdp-endpoint requires a value');
+      endpoint = value;
+      continue;
+    }
+    if (arg.startsWith('-')) throw new Error(`Unknown argument: ${arg}`);
   }
-  const unknown = args.find(arg => arg.startsWith('-'));
-  if (unknown) throw new Error(`Unknown argument: ${unknown}`);
-  return process.env.COCOS_CDP_ENDPOINT ?? 'http://127.0.0.1:9222';
+  return { endpoint, allowRuntimeMutation };
 }
 
 async function main(): Promise<void> {
-  const browser = new BrowserConnection(endpointFromArgs(process.argv.slice(2)));
-  const server = createServer(browser);
+  const options = optionsFromArgs(process.argv.slice(2));
+  const browser = new BrowserConnection(options.endpoint);
+  const server = createServer(browser, { allowRuntimeMutation: options.allowRuntimeMutation });
   let closing = false;
   const close = async () => {
     if (closing) return;

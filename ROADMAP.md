@@ -51,7 +51,7 @@ Use one package version source for both the npm package and MCP server metadata.
 
 **Done when:** the installed-package smoke test verifies the reported MCP server version.
 
-## Phase 1 — Target discovery and diagnostics
+## Phase 1 — Target discovery and diagnostics — Complete
 
 ### `cocos_list_pages`
 
@@ -122,7 +122,7 @@ Every successful mutation should follow a common result shape:
 
 Optional target fields should be omitted when they do not apply.
 
-### `cocos_set_node_active`
+### `cocos_set_node_active` — Complete
 
 Set one node's active state.
 
@@ -133,7 +133,7 @@ Requirements:
 - Return the previous and resulting active states.
 - Report whether the value actually changed.
 
-### `cocos_set_transform`
+### `cocos_set_transform` — Complete
 
 Update selected transform fields:
 
@@ -149,7 +149,7 @@ Requirements:
 - Use public Cocos APIs where available.
 - Return bounded before/after values.
 
-### `cocos_set_property`
+### `cocos_set_property` — Complete
 
 Update one public component data property.
 
@@ -164,7 +164,7 @@ Requirements:
 
 A component type may be used for discovery, but not as a mutation target when multiple components share that type.
 
-### `cocos_pause` and `cocos_resume`
+### `cocos_pause` and `cocos_resume` — Complete
 
 Pause or resume the Cocos director through supported public APIs.
 
@@ -176,7 +176,7 @@ Requirements:
 
 **Done when:** users can inspect, modify, verify, and manually restore common runtime state without arbitrary evaluation.
 
-## Phase 3 — Better inspection workflows
+## Phase 3 — Better inspection workflows — Complete
 
 ### `cocos_get_node`
 
@@ -215,7 +215,7 @@ Replace a single ambiguous truncation flag with bounded reason codes such as:
 
 Include counts for inspected, skipped, redacted, and returned properties without exposing secret keys or values.
 
-## Phase 4 — Visual debugging
+## Phase 4 — Visual debugging — Complete
 
 ### `cocos_get_node_bounds`
 
@@ -252,7 +252,7 @@ Requirements:
 - Do not save files by default.
 - Do not capture a full page as an implicit fallback.
 
-## Phase 5 — Debugging workflows
+## Phase 5 — Debugging workflows — Snapshot complete; frame stepping blocked on compatibility evidence
 
 ### `cocos_step_frame`
 
@@ -270,7 +270,7 @@ Mutation results should contain enough previous state for the client to request 
 
 Do not add a general `cocos_invoke_method` tool. Add narrowly scoped commands for validated use cases instead.
 
-## Phase 6 — Runtime diagnostics
+## Phase 6 — Runtime diagnostics — Hierarchy diagnostics complete; render metrics blocked on public API evidence
 
 Add only metrics available through stable, public Cocos APIs:
 
@@ -283,7 +283,7 @@ Add only metrics available through stable, public Cocos APIs:
 
 Diagnostics must remain observational. They must not silently enable profiling systems or modify game configuration.
 
-## Phase 7 — 1.0 release readiness
+## Phase 7 — Release readiness — CI/docs complete; compatibility matrix and release configuration pending handoff/setup
 
 Before `1.0.0`:
 

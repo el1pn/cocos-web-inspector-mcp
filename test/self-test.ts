@@ -38,9 +38,20 @@ function withFakeCocos(run: () => void): void {
     contentSize = { width: 100, height: 40 };
     anchorPoint = { x: 0.5, y: 0.5 };
   }
+  class StatsComponent {
+    uuid = 'component-stats';
+    enabled = true;
+    count = 42;
+    title = 'Player';
+    tint = { r: 1, g: 2, b: 3, a: 4 };
+  }
   const child: any = {
-    uuid: 'child-1', name: 'Player', active: true, activeInHierarchy: true, children: [], components: [new UITransform()],
-    worldPosition: { x: 50, y: 30 }, scale: { x: 1, y: 1 },
+    uuid: 'child-1', name: 'Player', active: true, activeInHierarchy: true, children: [], components: [new UITransform(), new StatsComponent()],
+    position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1, y: 1, z: 1 },
+    setPosition(x: number, y: number, z: number) { this.position = { x, y, z }; },
+    setRotation(x: number, y: number, z: number, w: number) { this.rotation = { x, y, z, w }; },
+    setScale(x: number, y: number, z: number) { this.scale = { x, y, z }; },
+    worldPosition: { x: 50, y: 30 },
     secretToken: 'secret-token-value', accessTokens: 'access-tokens-value', refreshToken2: 'refresh-token-value', cookies: 'cookies-value', credentials: 'credentials-value',
     apiKey: 'api-key-value', APIKey: 'upper-api-key-value', apiKey2: 'numbered-api-key-value', privateKey: 'private-key-value', jwt: 'jwt-value', JWTToken: 'jwt-token-value',
     authHeader: 'auth-header-value', sessionId: 'session-value', bearerAuth: 'bearer-value', sessionScore: 12, publicValue: 7,
@@ -48,7 +59,12 @@ function withFakeCocos(run: () => void): void {
   child.loop = child;
   const scene = { uuid: 'scene-1', name: 'Scene', active: true, activeInHierarchy: true, children: [child], components: [] };
   const previous = (globalThis as any).cc;
-  (globalThis as any).cc = { ENGINE_VERSION: '3.8.7', director: { getScene: () => scene } };
+  let paused = false;
+  (globalThis as any).cc = {
+    ENGINE_VERSION: '3.8.7',
+    director: { getScene: () => scene, isPaused: () => paused, pause: () => { paused = true; }, resume: () => { paused = false; } },
+    view: { getVisibleSize: () => ({ width: 1280, height: 720 }), getVisibleOrigin: () => ({ x: 0, y: 0 }) },
+  };
   try { run(); } finally { (globalThis as any).cc = previous; }
 }
 
@@ -135,6 +151,66 @@ test('bridge traverses, finds, and lists fake Cocos data', () => withFakeCocos((
   assert.equal(found.matches[0].path, '/Scene/Player');
   const listed = inspectCocos({ action: 'getComponents', uuid: 'child-1' }) as any;
   assert.equal(listed.components[0].type, 'UITransform');
+  const context = inspectCocos({ action: 'getNode', uuid: 'child-1' }) as any;
+  assert.equal(context.node.path, '/Scene/Player');
+  const snapshot = inspectCocos({ action: 'snapshotSubtree', uuid: 'scene-1', maxDepth: 1, maxNodes: 10 }) as any;
+  assert.equal(snapshot.snapshot.children[0].uuid, 'child-1');
+  assert.equal(snapshot.truncated, false);
+  assert.deepEqual(inspectCocos({ action: 'getNodeBounds', uuid: 'child-1' }), { available: false, reason: 'NO_CANVAS', version: '3.8.7', uuid: 'child-1' });
+  assert.equal(context.parent.uuid, 'scene-1');
+  assert.equal(context.components[1].uuid, 'component-stats');
+  const filtered = inspectCocos({ action: 'findNode', nameContains: 'lay', componentType: 'StatsComponent', active: true, pathPrefix: '/Scene' }) as any;
+  assert.equal(filtered.matches[0].uuid, 'child-1');
+  const byComponent = inspectCocos({ action: 'getProperties', uuid: 'child-1', componentUuid: 'component-stats', maxDepth: 3 }) as any;
+  assert.equal(byComponent.componentType, 'StatsComponent');
+  assert.equal(byComponent.properties.count, 42);
+  const runtime = inspectCocos({ action: 'runtimeInfo' }) as any;
+  assert.deepEqual(runtime.scene, { name: 'Scene', uuid: 'scene-1' });
+  const diagnostics = inspectCocos({ action: 'runtimeDiagnostics' }) as any;
+  assert.equal(diagnostics.nodeCount, 2);
+  assert.equal(diagnostics.componentCount, 2);
+  assert.equal(diagnostics.maxHierarchyDepth, 1);
+  assert.equal(diagnostics.unavailableMetrics.fps, 'UNSUPPORTED_PUBLIC_API');
+  assert.deepEqual(runtime.visibleSize, { width: 1280, height: 720 });
+  assert.deepEqual(runtime.director, { paused: false, running: true });
+  assert.equal(runtime.nodeCount, 2);
+  assert.deepEqual(inspectCocos({ action: 'setNodeActive', uuid: 'child-1', active: false }), {
+    changed: true,
+    target: { nodeUuid: 'child-1' },
+    before: { active: true },
+    after: { active: false },
+    runtimeOnly: true,
+  });
+  assert.deepEqual(inspectCocos({ action: 'setNodeActive', uuid: 'child-1', active: false }), {
+    changed: false,
+    target: { nodeUuid: 'child-1' },
+    before: { active: false },
+    after: { active: false },
+    runtimeOnly: true,
+  });
+  assert.deepEqual(inspectCocos({ action: 'setTransform', uuid: 'child-1', position: { x: 1, y: 2, z: 3 }, scale: { x: 2, y: 2, z: 2 } }), {
+    changed: true,
+    target: { nodeUuid: 'child-1' },
+    before: { position: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
+    after: { position: { x: 1, y: 2, z: 3 }, scale: { x: 2, y: 2, z: 2 } },
+    runtimeOnly: true,
+  });
+  assert.deepEqual(inspectCocos({ action: 'setProperty', uuid: 'child-1', componentUuid: 'component-stats', key: 'count', value: 7 }), {
+    changed: true,
+    target: { nodeUuid: 'child-1', componentUuid: 'component-stats' },
+    before: { value: 42 },
+    after: { value: 7 },
+    runtimeOnly: true,
+  });
+  assert.deepEqual(inspectCocos({ action: 'setProperty', uuid: 'child-1', componentUuid: 'component-stats', key: 'tint', value: { r: 4, g: 3, b: 2, a: 1 } }), {
+    changed: true,
+    target: { nodeUuid: 'child-1', componentUuid: 'component-stats' },
+    before: { value: { r: 1, g: 2, b: 3, a: 4 } },
+    after: { value: { r: 4, g: 3, b: 2, a: 1 } },
+    runtimeOnly: true,
+  });
+  assert.deepEqual(inspectCocos({ action: 'pause' }), { changed: true, target: {}, before: { paused: false, running: true }, after: { paused: true, running: false }, runtimeOnly: true });
+  assert.deepEqual(inspectCocos({ action: 'resume' }), { changed: true, target: {}, before: { paused: true, running: false }, after: { paused: false, running: true }, runtimeOnly: true });
 }));
 
 test('property serializer avoids getters, secrets, and cycles', () => withFakeCocos(() => {
@@ -194,7 +270,7 @@ test('runBridge bounds oversized encoded responses', async () => {
   const page = { evaluate: async () => ({ payload: '\\'.repeat(100_000) }) } as any;
   assert.deepEqual(await runBridge(page, { action: 'sceneTree' }), {
     truncated: true,
-    reason: 'Response exceeded 200000 bytes',
+    truncationReasons: ['RESPONSE_LIMIT'],
   });
 });
 
@@ -204,7 +280,7 @@ test('bridge rejects non-3.x runtimes', () => {
   delete (globalThis as any).cc;
 });
 
-test('MCP exposes exactly five strict tools with accurate annotations', async () => {
+test('MCP omits runtime mutation tools by default', async () => {
   const browser = new BrowserConnection('http://127.0.0.1:9222');
   const server = createServer(browser);
   const client = new Client({ name: 'self-test', version: '1.0.0' });
@@ -213,11 +289,18 @@ test('MCP exposes exactly five strict tools with accurate annotations', async ()
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     const tools = await client.listTools();
     assert.deepEqual(tools.tools.map(tool => tool.name).sort(), [
+      'cocos_capture_node',
       'cocos_find_node',
       'cocos_get_components',
+      'cocos_get_node',
+      'cocos_get_node_bounds',
       'cocos_get_properties',
       'cocos_highlight_node',
+      'cocos_list_pages',
+      'cocos_runtime_diagnostics',
+      'cocos_runtime_info',
       'cocos_scene_tree',
+      'cocos_snapshot_subtree',
     ]);
     const highlight = tools.tools.find(tool => tool.name === 'cocos_highlight_node');
     assert.deepEqual(highlight?.annotations, {
@@ -228,6 +311,29 @@ test('MCP exposes exactly five strict tools with accurate annotations', async ()
     });
     assert.ok(tools.tools.filter(tool => tool !== highlight).every(tool => tool.annotations?.readOnlyHint === true));
     const invalid = await client.callTool({ name: 'cocos_get_components', arguments: { uuid: 'x', extra: true } });
+    assert.equal(invalid.isError, true);
+  } finally {
+    await Promise.allSettled([client.close(), server.close(), browser.close()]);
+  }
+});
+
+test('MCP exposes opted-in node active mutation with strict input', async () => {
+  const browser = new BrowserConnection('http://127.0.0.1:9222');
+  const server = createServer(browser, { allowRuntimeMutation: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const tools = await client.listTools();
+    for (const name of ['cocos_set_node_active', 'cocos_set_transform', 'cocos_set_property', 'cocos_pause', 'cocos_resume']) {
+      assert.deepEqual(tools.tools.find(tool => tool.name === name)?.annotations, {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      });
+    }
+    const invalid = await client.callTool({ name: 'cocos_set_node_active', arguments: { uuid: 'x', active: true, extra: true } });
     assert.equal(invalid.isError, true);
   } finally {
     await Promise.allSettled([client.close(), server.close(), browser.close()]);

@@ -2,10 +2,24 @@ import type { Page } from 'playwright-core';
 
 export type BridgeRequest =
   | { action: 'sceneTree'; maxDepth?: number | undefined; maxNodes?: number | undefined }
-  | { action: 'findNode'; uuid?: string | undefined; name?: string | undefined; path?: string | undefined; limit?: number | undefined }
+  | { action: 'findNode'; uuid?: string | undefined; name?: string | undefined; path?: string | undefined; nameContains?: string | undefined; componentType?: string | undefined; active?: boolean | undefined; pathPrefix?: string | undefined; limit?: number | undefined }
+  | { action: 'getNode'; uuid: string }
+  | { action: 'getNodeBounds'; uuid: string }
+  | { action: 'snapshotSubtree'; uuid: string; maxDepth?: number | undefined; maxNodes?: number | undefined }
   | { action: 'getComponents'; uuid: string }
-  | { action: 'getProperties'; uuid: string; componentType?: string | undefined; maxDepth?: number | undefined }
-  | { action: 'highlightNode'; uuid: string; durationMs?: number | undefined };
+  | { action: 'getProperties'; uuid: string; componentType?: string | undefined; componentUuid?: string | undefined; maxDepth?: number | undefined }
+  | { action: 'highlightNode'; uuid: string; durationMs?: number | undefined }
+  | { action: 'runtimeInfo' }
+  | { action: 'runtimeDiagnostics' }
+  | { action: 'setNodeActive'; uuid: string; active: boolean }
+  | { action: 'setTransform'; uuid: string; position?: Vector3 | undefined; rotation?: Quaternion | undefined; scale?: Vector3 | undefined }
+  | { action: 'setProperty'; uuid: string; componentUuid: string; key: string; value: PropertyValue }
+  | { action: 'pause' }
+  | { action: 'resume' };
+
+type Vector3 = { x: number; y: number; z: number };
+type Quaternion = { x: number; y: number; z: number; w: number };
+type PropertyValue = boolean | number | string | { x: number; y: number; z?: number | undefined; w?: number | undefined } | { width: number; height: number } | { r: number; g: number; b: number; a?: number | undefined };
 
 const MAX_BYTES = 200_000;
 
@@ -14,9 +28,35 @@ export async function runBridge(page: Page, request: BridgeRequest): Promise<unk
   const text = JSON.stringify(result);
   const encoded = JSON.stringify({ content: [{ type: 'text', text }], structuredContent: result });
   if (Buffer.byteLength(encoded, 'utf8') > MAX_BYTES - 4_096) {
-    return { truncated: true, reason: `Response exceeded ${MAX_BYTES} bytes` };
+    return { truncated: true, truncationReasons: ['RESPONSE_LIMIT'] };
   }
   return result;
+}
+
+export async function captureNode(page: Page, uuid: string): Promise<unknown> {
+  const result = await page.evaluate(inspectCocos, { action: 'getNodeBounds', uuid } satisfies BridgeRequest) as any;
+  if (!result.available || !result.visible) return { captured: false, reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
+  const clip = result.clippedViewport;
+  if (!clip || !Number.isFinite(clip.x) || !Number.isFinite(clip.y) || !Number.isFinite(clip.width) || !Number.isFinite(clip.height) || clip.width <= 0 || clip.height <= 0 || clip.width > 1_024 || clip.height > 1_024 || clip.width * clip.height > 1_048_576) return { captured: false, reason: 'CAPTURE_LIMIT' };
+  const png = await page.screenshot({ type: 'png', clip });
+  const data = png.toString('base64');
+  if (Buffer.byteLength(JSON.stringify({ data }), 'utf8') > MAX_BYTES - 4_096) return { captured: false, reason: 'RESPONSE_LIMIT' };
+  return { captured: true, mimeType: 'image/png', data, width: Math.round(clip.width), height: Math.round(clip.height) };
+}
+
+export function inspectCocosPage(): unknown {
+  const root = globalThis as typeof globalThis & { cc?: Record<string, any>; CC?: Record<string, any>; document?: Document };
+  const cc = root.cc ?? root.CC;
+  const version = String(cc?.ENGINE_VERSION ?? cc?.version ?? '');
+  const scene = cc?.director?.getScene?.();
+  return {
+    title: String(root.document?.title ?? '').slice(0, 500),
+    cocos: {
+      detected: version.startsWith('3.'),
+      version: version.startsWith('3.') ? version : undefined,
+      sceneName: version.startsWith('3.') && scene ? String(scene.name ?? '').slice(0, 500) : undefined,
+    },
+  };
 }
 
 export function inspectCocos(request: BridgeRequest): unknown {
@@ -113,6 +153,84 @@ export function inspectCocos(request: BridgeRequest): unknown {
     if (!match) throw new Error(traversal.truncated ? 'Node not found within traversal limit' : 'Node not found');
     return match;
   };
+  const nodeBounds = (node: any): any => {
+    const document = root.document;
+    const transform = components(node).find(component => componentName(component) === 'UITransform');
+    if (!transform?.contentSize || !transform?.anchorPoint) return { available: false, reason: 'NO_UI_TRANSFORM' };
+    const canvas = cc.game?.canvas ?? document?.querySelector('#GameCanvas');
+    if (typeof HTMLCanvasElement === 'undefined' || !(canvas instanceof HTMLCanvasElement)) return { available: false, reason: 'NO_CANVAS' };
+    const canvasRect = canvas.getBoundingClientRect();
+    const visible = cc.view?.getVisibleSize?.() ?? { width: canvasRect.width, height: canvasRect.height };
+    const position = node.worldPosition ?? node.getWorldPosition?.();
+    const values = [canvasRect.left, canvasRect.top, canvasRect.width, canvasRect.height, visible.width, visible.height, position?.x, position?.y, transform.contentSize.width, transform.contentSize.height, transform.anchorPoint.x, transform.anchorPoint.y];
+    if (!position) return { available: false, reason: 'NO_WORLD_POSITION' };
+    if (!values.every(Number.isFinite) || visible.width <= 0 || visible.height <= 0 || canvasRect.width <= 0 || canvasRect.height <= 0) return { available: false, reason: 'INVALID_GEOMETRY' };
+    const left = -Number(transform.contentSize.width) * Number(transform.anchorPoint.x);
+    const bottom = -Number(transform.contentSize.height) * Number(transform.anchorPoint.y);
+    const scale = node.worldScale ?? node.scale ?? { x: 1, y: 1 };
+    const points = typeof transform.convertToWorldSpaceAR === 'function' && cc.Vec3
+      ? [[left, bottom], [left + Number(transform.contentSize.width), bottom], [left, bottom + Number(transform.contentSize.height)], [left + Number(transform.contentSize.width), bottom + Number(transform.contentSize.height)]].map(([x, y]) => transform.convertToWorldSpaceAR(new cc.Vec3(x, y, 0)))
+      : [{ x: Number(position.x) + left * Number(scale.x ?? 1), y: Number(position.y) + bottom * Number(scale.y ?? 1) }, { x: Number(position.x) + (left + Number(transform.contentSize.width)) * Number(scale.x ?? 1), y: Number(position.y) + (bottom + Number(transform.contentSize.height)) * Number(scale.y ?? 1) }];
+    if (!points.every(point => Number.isFinite(point.x) && Number.isFinite(point.y))) return { available: false, reason: 'INVALID_GEOMETRY' };
+    const worldX = Math.min(...points.map(point => Number(point.x)));
+    const worldY = Math.min(...points.map(point => Number(point.y)));
+    const worldWidth = Math.max(...points.map(point => Number(point.x))) - worldX;
+    const worldHeight = Math.max(...points.map(point => Number(point.y))) - worldY;
+    const origin = cc.view?.getVisibleOrigin?.() ?? { x: 0, y: 0 };
+    const viewport = { x: canvasRect.left + (worldX - Number(origin.x ?? 0)) * canvasRect.width / Number(visible.width), y: canvasRect.top + (Number(origin.y ?? 0) + Number(visible.height) - worldY - worldHeight) * canvasRect.height / Number(visible.height), width: worldWidth * canvasRect.width / Number(visible.width), height: worldHeight * canvasRect.height / Number(visible.height) };
+    if (!Object.values(viewport).every(Number.isFinite) || viewport.width <= 0 || viewport.height <= 0) return { available: false, reason: 'INVALID_GEOMETRY' };
+    const clipped = { x: Math.max(0, viewport.x), y: Math.max(0, viewport.y), width: Math.max(0, Math.min(innerWidth, viewport.x + viewport.width) - Math.max(0, viewport.x)), height: Math.max(0, Math.min(innerHeight, viewport.y + viewport.height) - Math.max(0, viewport.y)) };
+    return { available: true, canvas: { x: worldX, y: worldY, width: worldWidth, height: worldHeight }, viewport, clippedViewport: clipped, anchor: { x: Number(transform.anchorPoint.x), y: Number(transform.anchorPoint.y) }, worldPosition: { x: Number(position.x), y: Number(position.y), z: Number(position.z ?? 0) }, visible: clipped.width > 0 && clipped.height > 0, outsideViewport: clipped.width === 0 || clipped.height === 0 };
+  };
+
+  if (request.action === 'runtimeInfo') {
+    const canvas = cc.game?.canvas ?? root.document?.querySelector('#GameCanvas');
+    const canvasSize = typeof HTMLCanvasElement !== 'undefined' && canvas instanceof HTMLCanvasElement ? { width: canvas.width, height: canvas.height } : undefined;
+    const visibleSize = cc.view?.getVisibleSize?.();
+    const visibleOrigin = cc.view?.getVisibleOrigin?.();
+    let nodeCount = 0;
+    const traversal = walk(() => { nodeCount++; });
+    const paused = typeof cc.director?.isPaused === 'function' ? Boolean(cc.director.isPaused()) : undefined;
+    return {
+      version,
+      scene: { name: String(scene.name ?? '').slice(0, 500), uuid: String(scene.uuid ?? '') },
+      canvasSize,
+      visibleSize: visibleSize ? { width: Number(visibleSize.width), height: Number(visibleSize.height) } : undefined,
+      visibleOrigin: visibleOrigin ? { x: Number(visibleOrigin.x), y: Number(visibleOrigin.y) } : undefined,
+      director: paused === undefined ? undefined : { paused, running: !paused },
+      nodeCount,
+      truncated: traversal.truncated,
+    };
+  }
+
+  if (request.action === 'runtimeDiagnostics') {
+    let nodeCount = 0;
+    let componentCount = 0;
+    let maxDepth = 0;
+    const names = new Map<string, string[]>();
+    const traversal = walk((node, _path, depth) => {
+      nodeCount++;
+      componentCount += components(node).length;
+      maxDepth = Math.max(maxDepth, depth);
+      const name = String(node?.name ?? '').slice(0, 500);
+      if (name) {
+        const uuids = names.get(name) ?? [];
+        if (uuids.length < 100) uuids.push(String(node?.uuid ?? ''));
+        names.set(name, uuids);
+      }
+    });
+    const duplicateNames = [...names.entries()].filter(([, uuids]) => uuids.length > 1).slice(0, 100).map(([name, uuids]) => ({ name, uuids, count: uuids.length }));
+    return {
+      version,
+      nodeCount,
+      componentCount,
+      maxHierarchyDepth: maxDepth,
+      duplicateNames,
+      unavailableMetrics: { fps: 'UNSUPPORTED_PUBLIC_API', frameTime: 'UNSUPPORTED_PUBLIC_API', drawCalls: 'UNSUPPORTED_PUBLIC_API', triangles: 'UNSUPPORTED_PUBLIC_API', invalidComponentReferences: 'UNSUPPORTED_PUBLIC_API' },
+      truncated: traversal.truncated || duplicateNames.length >= 100,
+      truncationReasons: traversal.truncated || duplicateNames.length >= 100 ? ['NODE_LIMIT'] : [],
+    };
+  }
 
   if (request.action === 'sceneTree') {
     const maxDepth = Math.min(Math.max(request.maxDepth ?? 6, 0), 20);
@@ -148,14 +266,18 @@ export function inspectCocos(request: BridgeRequest): unknown {
   }
 
   if (request.action === 'findNode') {
-    if (![request.uuid, request.name, request.path].filter(Boolean).length) throw new Error('uuid, name, or path is required');
+    if (![request.uuid, request.name, request.path, request.nameContains, request.componentType, request.active, request.pathPrefix].some(value => value !== undefined)) throw new Error('At least one node filter is required');
     const limit = Math.min(Math.max(request.limit ?? 20, 1), 100);
     const matches: unknown[] = [];
     let more = false;
     const traversal = walk((node, path) => {
-      const matched = request.uuid ? node?.uuid === request.uuid
-        : request.path ? path === request.path
-          : node?.name === request.name;
+      const matched = (request.uuid === undefined || node?.uuid === request.uuid)
+        && (request.name === undefined || node?.name === request.name)
+        && (request.path === undefined || path === request.path)
+        && (request.nameContains === undefined || String(node?.name ?? '').includes(request.nameContains))
+        && (request.componentType === undefined || components(node).some(component => componentName(component) === request.componentType))
+        && (request.active === undefined || (node?.active !== false) === request.active)
+        && (request.pathPrefix === undefined || path.startsWith(request.pathPrefix));
       if (matched) {
         if (matches.length < limit) matches.push({ ...summary(node), path });
         else {
@@ -164,7 +286,56 @@ export function inspectCocos(request: BridgeRequest): unknown {
         }
       }
     });
-    return { version, matches, ambiguous: matches.length > 1 || more, truncated: more || traversal.truncated };
+    return { version, matches, ambiguous: matches.length > 1 || more, truncated: more || traversal.truncated, truncationReasons: more || traversal.truncated ? ['NODE_LIMIT'] : [] };
+  }
+
+  if (request.action === 'getNode') {
+    const node = findByUuid(request.uuid);
+    let parent: any;
+    let path = '';
+    walk((candidate, candidatePath) => {
+      if (children(candidate).includes(node)) parent = candidate;
+      if (candidate === node) path = candidatePath;
+    });
+    const directChildren = children(node);
+    const nodeComponents = components(node);
+    return {
+      version,
+      node: { ...summary(node), path },
+      parent: parent ? summary(parent) : undefined,
+      children: directChildren.slice(0, 200).map(summary),
+      components: nodeComponents.slice(0, 200).map(component => ({ type: componentName(component), uuid: String(component.uuid ?? ''), enabled: component.enabled !== false })),
+      truncated: directChildren.length > 200 || nodeComponents.length > 200,
+      truncationReasons: directChildren.length > 200 || nodeComponents.length > 200 ? ['NODE_LIMIT'] : [],
+    };
+  }
+
+  if (request.action === 'snapshotSubtree') {
+    const rootNode = findByUuid(request.uuid);
+    const maxDepth = Math.min(Math.max(request.maxDepth ?? 6, 0), 20);
+    const maxNodes = Math.min(Math.max(request.maxNodes ?? 500, 1), 5_000);
+    let count = 0;
+    const reasons = new Set<string>();
+    const build = (node: any, depth: number): any => {
+      if (count >= maxNodes) {
+        reasons.add('NODE_LIMIT');
+        return undefined;
+      }
+      count++;
+      const item: any = {
+        ...summary(node),
+        components: components(node).slice(0, 200).map(component => ({ type: componentName(component), uuid: String(component.uuid ?? ''), enabled: component.enabled !== false })),
+      };
+      if (components(node).length > 200) reasons.add('NODE_LIMIT');
+      if (depth >= maxDepth) {
+        if (children(node).length) reasons.add('MAX_DEPTH');
+        return item;
+      }
+      item.children = children(node).map(child => build(child, depth + 1)).filter(Boolean);
+      return item;
+    };
+    const snapshot = build(rootNode, 0);
+    return { version, rootUuid: request.uuid, snapshot, nodeCount: count, truncated: reasons.size > 0, truncationReasons: [...reasons] };
   }
 
   if (request.action === 'getComponents') {
@@ -183,18 +354,25 @@ export function inspectCocos(request: BridgeRequest): unknown {
 
   if (request.action === 'getProperties') {
     const node = findByUuid(request.uuid);
-    const selected = request.componentType
-      ? components(node).find(component => componentName(component) === request.componentType)
-      : node;
+    const matches = request.componentType ? components(node).filter(component => componentName(component) === request.componentType) : [];
+    if (matches.length > 1) throw new Error('Ambiguous component type');
+    const selected = request.componentUuid
+      ? components(node).find(component => component?.uuid === request.componentUuid)
+      : request.componentType ? matches[0] : node;
     if (!selected) throw new Error('Component not found');
     const maxDepth = Math.min(Math.max(request.maxDepth ?? 3, 0), 6);
     let propertyCount = 0;
+    let skipped = 0;
+    let redacted = 0;
+    let returned = 0;
+    const truncationReasons = new Set<string>();
     let truncated = false;
+    const truncate = (reason: string) => { truncated = true; truncationReasons.add(reason); };
     const seen = new WeakSet<object>();
     const serialize = (value: any, depth: number, reference = true): any => {
       if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
       if (typeof value === 'string') {
-        if (value.length > 2_000) truncated = true;
+        if (value.length > 2_000) truncate('STRING_LIMIT');
         return value.slice(0, 2_000);
       }
       if (typeof value !== 'object') return undefined;
@@ -204,11 +382,11 @@ export function inspectCocos(request: BridgeRequest): unknown {
       }
       if (reference && uuid && dataProperty(value, 'node')) return { $type: 'Component', uuid: String(uuid), type: componentName(value) };
       if (depth >= maxDepth) {
-        truncated = true;
+        truncate('MAX_DEPTH');
         return '[MaxDepth]';
       }
       if (seen.has(value)) {
-        truncated = true;
+        truncate('MAX_DEPTH');
         return '[Circular]';
       }
       seen.add(value);
@@ -218,68 +396,152 @@ export function inspectCocos(request: BridgeRequest): unknown {
         if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
         inspected++;
         if (inspected > 1_000) {
-          truncated = true;
+          truncate('PROPERTY_LIMIT');
           break;
         }
         if (propertyCount >= 1_000) {
-          truncated = true;
+          truncate('PROPERTY_LIMIT');
           break;
         }
         propertyCount++;
-        if (key.startsWith('_') || isSensitiveKey(key)) continue;
+        if (key.startsWith('_') || isSensitiveKey(key)) {
+          redacted++;
+          continue;
+        }
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
-        if (!descriptor || !('value' in descriptor)) continue;
+        if (!descriptor || !('value' in descriptor)) {
+          skipped++;
+          continue;
+        }
         const item = serialize(descriptor.value, depth + 1);
         if (item !== undefined) {
           if (Array.isArray(output)) {
             const index = Number(key);
-            if (Number.isInteger(index) && index >= 0 && index < 1_000) output[index] = item;
-            else truncated = true;
-          } else output[key] = item;
+            if (Number.isInteger(index) && index >= 0 && index < 1_000) {
+              output[index] = item;
+              returned++;
+            } else truncate('PROPERTY_LIMIT');
+          } else {
+            output[key] = item;
+            returned++;
+          }
         }
       }
       seen.delete(value);
       return output;
     };
-    return { version, node: summary(node), componentType: request.componentType, properties: serialize(selected, 0, false), truncated, propertyCount };
+    return {
+      version,
+      node: summary(node),
+      componentType: request.componentType ?? (selected === node ? undefined : componentName(selected)),
+      componentUuid: selected === node ? undefined : String(selected.uuid ?? ''),
+      properties: serialize(selected, 0, false),
+      truncated,
+      truncationReasons: [...truncationReasons],
+      propertyCount,
+      inspected: propertyCount,
+      skipped,
+      redacted,
+      returned,
+    };
   }
 
-  const node = findByUuid(request.uuid);
-  const document = root.document;
-  if (!document?.body) throw new Error('Page document is unavailable');
-  const transform = components(node).find(component => componentName(component) === 'UITransform');
-  if (!transform?.contentSize || !transform?.anchorPoint) throw new Error('Node has no UITransform');
-  const canvas = cc.game?.canvas ?? document.querySelector('#GameCanvas');
-  if (!(canvas instanceof HTMLCanvasElement)) throw new Error('Cocos canvas not found');
-  const canvasRect = canvas.getBoundingClientRect();
-  const visible = cc.view?.getVisibleSize?.() ?? { width: canvasRect.width, height: canvasRect.height };
-  const position = node.worldPosition ?? node.getWorldPosition?.();
-  if (!position) throw new Error('Node world position is unavailable');
-  const scale = node.worldScale ?? node.scale ?? { x: 1, y: 1 };
-  const localWidth = Number(transform.contentSize.width);
-  const localHeight = Number(transform.contentSize.height);
-  const anchorX = Number(transform.anchorPoint.x);
-  const anchorY = Number(transform.anchorPoint.y);
-  const left = -localWidth * anchorX;
-  const bottom = -localHeight * anchorY;
-  const points = typeof transform.convertToWorldSpaceAR === 'function' && cc.Vec3
-    ? [[left, bottom], [left + localWidth, bottom], [left, bottom + localHeight], [left + localWidth, bottom + localHeight]]
-      .map(([x, y]) => transform.convertToWorldSpaceAR(new cc.Vec3(x, y, 0)))
-    : [{ x: Number(position.x) + left * Number(scale.x ?? 1), y: Number(position.y) + bottom * Number(scale.y ?? 1) },
-      { x: Number(position.x) + (left + localWidth) * Number(scale.x ?? 1), y: Number(position.y) + (bottom + localHeight) * Number(scale.y ?? 1) }];
-  const worldX = Math.min(...points.map(point => Number(point.x)));
-  const worldY = Math.min(...points.map(point => Number(point.y)));
-  const width = Math.max(...points.map(point => Number(point.x))) - worldX;
-  const height = Math.max(...points.map(point => Number(point.y))) - worldY;
-  const visibleOrigin = cc.view?.getVisibleOrigin?.() ?? { x: 0, y: 0 };
-  const scaleX = canvasRect.width / Number(visible.width);
-  const scaleY = canvasRect.height / Number(visible.height);
-  const bounds = {
-    x: canvasRect.left + (worldX - Number(visibleOrigin.x ?? 0)) * scaleX,
-    y: canvasRect.top + (Number(visibleOrigin.y ?? 0) + Number(visible.height) - worldY - height) * scaleY,
-    width: width * scaleX,
-    height: height * scaleY,
+  const invalidMutation = (message: string): never => { throw new Error(`Invalid mutation: ${message}`); };
+  const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && Math.abs(value) <= 1_000_000;
+  const vector = (value: any, keys: string[]): Record<string, number> => {
+    if (!value || typeof value !== 'object' || Object.keys(value).some(key => !keys.includes(key)) || !keys.every(key => finite(value[key]))) invalidMutation(`expected finite ${keys.join('/')}`);
+    return Object.fromEntries(keys.map(key => [key, value[key]]));
   };
+  const snapshot = (value: any, keys: string[]): Record<string, number> => Object.fromEntries(keys.map(key => [key, Number(value?.[key] ?? 0)]));
+  const componentByUuid = (node: any, uuid: string): any => {
+    const component = components(node).find(candidate => candidate?.uuid === uuid);
+    if (!component) throw new Error('Component not found');
+    return component;
+  };
+  const directorState = () => {
+    if (typeof cc.director?.isPaused !== 'function') invalidMutation('director pause state is unavailable');
+    const paused = Boolean(cc.director.isPaused());
+    return { paused, running: !paused };
+  };
+
+  if (request.action === 'pause' || request.action === 'resume') {
+    const before = directorState();
+    const method = request.action === 'pause' ? 'pause' : 'resume';
+    if (typeof cc.director?.[method] !== 'function') invalidMutation(`director.${method} is unavailable`);
+    if (request.action === 'pause' ? !before.paused : before.paused) cc.director[method]();
+    const after = directorState();
+    return { changed: before.paused !== after.paused, target: {}, before, after, runtimeOnly: true };
+  }
+
+  if (request.action === 'setNodeActive') {
+    const node = findByUuid(request.uuid);
+    const before = node.active !== false;
+    if (before !== request.active) node.active = request.active;
+    const after = node.active !== false;
+    return { changed: before !== after, target: { nodeUuid: request.uuid }, before: { active: before }, after: { active: after }, runtimeOnly: true };
+  }
+
+  if (request.action === 'setTransform') {
+    if (!request.position && !request.rotation && !request.scale) invalidMutation('provide position, rotation, or scale');
+    const node = findByUuid(request.uuid);
+    const before = {
+      ...(request.position ? { position: snapshot(node.position, ['x', 'y', 'z']) } : {}),
+      ...(request.rotation ? { rotation: snapshot(node.rotation, ['x', 'y', 'z', 'w']) } : {}),
+      ...(request.scale ? { scale: snapshot(node.scale, ['x', 'y', 'z']) } : {}),
+    };
+    if (request.position) {
+      const position = vector(request.position, ['x', 'y', 'z']);
+      if (typeof node.setPosition !== 'function') invalidMutation('node.setPosition is unavailable');
+      node.setPosition(position.x, position.y, position.z);
+    }
+    if (request.rotation) {
+      const rotation = vector(request.rotation, ['x', 'y', 'z', 'w']);
+      if (typeof node.setRotation !== 'function') invalidMutation('node.setRotation is unavailable');
+      node.setRotation(rotation.x, rotation.y, rotation.z, rotation.w);
+    }
+    if (request.scale) {
+      const scale = vector(request.scale, ['x', 'y', 'z']);
+      if (typeof node.setScale !== 'function') invalidMutation('node.setScale is unavailable');
+      node.setScale(scale.x, scale.y, scale.z);
+    }
+    const after = {
+      ...(request.position ? { position: snapshot(node.position, ['x', 'y', 'z']) } : {}),
+      ...(request.rotation ? { rotation: snapshot(node.rotation, ['x', 'y', 'z', 'w']) } : {}),
+      ...(request.scale ? { scale: snapshot(node.scale, ['x', 'y', 'z']) } : {}),
+    };
+    return { changed: JSON.stringify(before) !== JSON.stringify(after), target: { nodeUuid: request.uuid }, before, after, runtimeOnly: true };
+  }
+
+  if (request.action === 'setProperty') {
+    if (request.key.startsWith('_') || isSensitiveKey(request.key)) invalidMutation('property key is not writable');
+    const node = findByUuid(request.uuid);
+    const component = componentByUuid(node, request.componentUuid);
+    let owner: any = component;
+    let descriptor: PropertyDescriptor | undefined;
+    for (let depth = 0; owner && depth < 20 && !descriptor; depth++, owner = Object.getPrototypeOf(owner)) descriptor = Object.getOwnPropertyDescriptor(owner, request.key);
+    if (!descriptor || !('value' in descriptor)) invalidMutation('property is not a data property');
+    const current = (descriptor as PropertyDescriptor & { value: any }).value;
+    const keys = current && typeof current === 'object'
+      ? 'width' in current && 'height' in current ? ['width', 'height'] : 'r' in current && 'g' in current && 'b' in current ? ['r', 'g', 'b', 'a'] : ['x', 'y', ...('z' in current ? ['z'] : []), ...('w' in current ? ['w'] : [])]
+      : undefined;
+    const safe = (value: any) => keys ? snapshot(value, keys) : value;
+    const before = safe(current);
+    if (typeof current === 'boolean' || typeof current === 'number' || typeof current === 'string') {
+      if (typeof current !== typeof request.value || typeof request.value === 'number' && !finite(request.value) || typeof request.value === 'string' && request.value.length > 2_000) invalidMutation('property value shape does not match');
+      component[request.key] = request.value;
+    } else if (keys && request.value && typeof request.value === 'object' && !Array.isArray(request.value)) {
+      Object.assign(current, vector(request.value, keys));
+    } else invalidMutation('property value shape does not match');
+    const after = safe(component[request.key]);
+    return { changed: JSON.stringify(before) !== JSON.stringify(after), target: { nodeUuid: request.uuid, componentUuid: request.componentUuid }, before: { value: before }, after: { value: after }, runtimeOnly: true };
+  }
+
+  if (request.action === 'getNodeBounds') return { version, uuid: request.uuid, ...nodeBounds(findByUuid(request.uuid)) };
+  if (request.action !== 'highlightNode') throw new Error('Unsupported bridge request');
+  const bounds = nodeBounds(findByUuid(request.uuid));
+  if (!bounds.available) return { version, uuid: request.uuid, highlighted: false, ...bounds };
+  const document = root.document;
+  if (!document?.body) return { version, uuid: request.uuid, highlighted: false, available: false, reason: 'NO_DOCUMENT' };
   let overlay = root.__cocosWebInspectorOverlay;
   if (!overlay?.isConnected) {
     overlay = document.createElement('div');
@@ -289,12 +551,12 @@ export function inspectCocos(request: BridgeRequest): unknown {
   Object.assign(overlay.style, {
     position: 'fixed', pointerEvents: 'none', zIndex: '2147483647', boxSizing: 'border-box',
     border: '2px solid #27c2ff', background: 'rgba(39, 194, 255, 0.2)',
-    left: `${bounds.x}px`, top: `${bounds.y}px`, width: `${bounds.width}px`, height: `${bounds.height}px`,
+    left: `${bounds.viewport.x}px`, top: `${bounds.viewport.y}px`, width: `${bounds.viewport.width}px`, height: `${bounds.viewport.height}px`,
   });
   clearTimeout(root.__cocosWebInspectorHighlightTimer);
   root.__cocosWebInspectorHighlightTimer = setTimeout(() => {
     overlay?.remove();
     if (root.__cocosWebInspectorOverlay === overlay) root.__cocosWebInspectorOverlay = undefined;
   }, Math.min(Math.max(request.durationMs ?? 2_000, 100), 10_000));
-  return { version, uuid: request.uuid, highlighted: true, bounds };
+  return { version, uuid: request.uuid, highlighted: true, ...bounds, bounds: bounds.viewport };
 }
