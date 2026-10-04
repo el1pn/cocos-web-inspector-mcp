@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.3
+
+### Fixed
+
+- Preserve the production fixture bytes so its SHA-256 handoff verifies after a Linux checkout.
+
 ## 0.1.2
 
 ### Added
