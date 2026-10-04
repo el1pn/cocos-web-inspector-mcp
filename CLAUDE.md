@@ -6,9 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```powershell
 npm install
+npm run install:chromium
 npm run build
 npm run typecheck
 npm test
+npm run test:integration
 npm run check
 npm start
 npm start -- --cdp-endpoint http://127.0.0.1:9222
@@ -23,7 +25,7 @@ npm run build
 node --test --test-name-pattern="property serializer" dist/test/self-test.js
 ```
 
-Tests compile into `dist/test/self-test.js`; `npm test` always builds first. `npm run check` is the full local gate: build, self-tests, and installed-package smoke test.
+Tests compile into `dist/test/`; `npm test` always builds first. Install the matching Chromium revision once with `npm run install:chromium`. `npm run check` is the full local gate: build, self-tests, live Chromium/Cocos integration test, and installed-package smoke test.
 
 ## Architecture
 
@@ -50,6 +52,22 @@ This server intentionally has a narrow, read-only inspection surface. Preserve t
 
 ## Tests
 
-`test/self-test.ts` uses Node's built-in test runner and a fake Cocos object graph. It covers URL policy, traversal, serialization/redaction, Cocos version rejection, and the MCP tool surface through an in-memory transport. It does not launch Chromium or a real Cocos build; changes to CDP integration or page rendering may require a separate manual check.
+`test/self-test.ts` uses Node's built-in test runner and a fake Cocos object graph. It covers URL policy, traversal, serialization/redaction, Cocos version rejection, and the MCP tool surface through an in-memory transport.
+
+`test/integration-test.ts` serves the vendored Cocos 3.8.8 build, launches Chromium with loopback CDP, and exercises page selection, all five tools, highlight bounds, and reconnect behavior. Do not silently skip this test when Chromium is missing.
 
 TypeScript uses `NodeNext`, strict mode, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes`. Source imports therefore use `.js` extensions, and optional fields may need explicit `| undefined` in shared request types.
+
+## Cross-repository fixture collaboration
+
+The sibling `cocos-web-inspector-fixture` repository owns the Cocos project, source scene, custom component, and generated web-build handoff. This repository owns the vendored integration-test snapshot, browser harness, MCP assertions, scripts, and CI.
+
+When work spans both repositories:
+
+1. Use `ListAgents` to find the live peer session by workspace name; do not persist a session ID.
+2. Use `SendMessage` for the fixture contract, status, changed-file list, build path, and manifest/checksum handoff.
+3. Modify only this repository. Never ask the peer to modify this repository, and never modify the fixture repository from this session.
+4. Treat sibling files as read-only until the fixture session explicitly hands off a generated build.
+5. If no fixture peer is available, stop at the handoff boundary instead of silently editing the sibling repository.
+
+Vendored Cocos builds are generated artifacts. Do not hand-edit them. Keep their provenance and checksum manifest beside the snapshot, and update them only from a fixture-session handoff.

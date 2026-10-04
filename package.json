@@ -27,10 +27,12 @@
     "typecheck": "tsc --noEmit",
     "test:built": "node --test dist/test/self-test.js",
     "test": "npm run build && npm run test:built",
+    "test:integration": "npm run build && node --test dist/test/integration-test.js",
     "test:package": "node test/package-test.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "prepack": "npm run clean && npm run build",
-    "check": "npm run build && npm run test:built && npm run test:package",
+    "check": "npm run build && npm run test:built && node --test dist/test/integration-test.js && npm run test:package",
+    "install:chromium": "playwright-core install chromium --only-shell",
     "audit:prod": "npm audit --omit=dev --audit-level=high",
     "start": "node dist/src/index.js"
   },
