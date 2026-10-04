@@ -98,7 +98,7 @@ The endpoint may instead be provided through the MCP process environment:
 
 ## Tools
 
-All tool input objects are strict. Unknown fields are rejected. Tools are annotated as read-only, idempotent, non-destructive, and closed-world.
+All tool input objects are strict. Unknown fields are rejected. Inspection tools are annotated as read-only, idempotent, non-destructive, and closed-world. The highlight tool is annotated as a non-destructive, non-idempotent, closed-world temporary mutation because repeated calls reset its removal timer.
 
 | Tool | Purpose | Inputs |
 | --- | --- | --- |
@@ -166,11 +166,12 @@ These controls reduce accidental disclosure; they do not make CDP a complete sec
 ## Development
 
 ```powershell
-npm run typecheck
-npm test
+npm run check
 ```
 
-`npm test` builds the project and runs self-contained Node.js tests against a fake Cocos 3.x object graph. The suite covers URL policy, scene traversal, property redaction and cycle handling, Cocos version rejection, strict tool schemas, and the five-tool read-only surface.
+`npm run check` type-checks, builds, runs the self-contained Node.js tests, packs the npm tarball, installs it into a temporary project, and smoke-tests the installed binary. Use it before pushing. `npm test` remains available for build plus self-tests only.
+
+The test suite covers URL policy, CDP connection reuse and recovery, scene traversal, property redaction and cycle handling, output bounds, Cocos version rejection, strict tool schemas, and exact tool annotations. CI runs the full check on Ubuntu and Windows and rejects high-severity production dependency advisories.
 
 The repository currently has no live Chromium/Cocos integration test.
 

@@ -32,7 +32,7 @@ export function sanitizeUrl(raw: string): string {
     url.password = '';
     url.search = '';
     url.hash = '';
-    return url.toString();
+    return url.toString().slice(0, 2_000);
   } catch {
     return '<invalid-url>';
   }
@@ -40,16 +40,22 @@ export function sanitizeUrl(raw: string): string {
 
 export class BrowserConnection {
   #browser: Browser | undefined;
+  #connecting: Promise<Browser> | undefined;
+  #closed = false;
 
   constructor(
     private readonly endpoint: string,
     private readonly timeout = 10_000,
+    private readonly connectOverCDP: (endpoint: string, options: { timeout: number }) => Promise<Browser> =
+      (target, options) => chromium.connectOverCDP(target, options),
   ) {
     validateLocalUrl(endpoint);
   }
 
   async page(pageUrl?: string): Promise<Page> {
+    if (this.#closed) throw new Error('Browser connection is closed');
     const browser = await this.#connect();
+    if (this.#closed) throw new Error('Browser connection is closed');
     const pages = browser.contexts().flatMap(context => context.pages()).filter(candidate => {
       try {
         validateLocalUrl(candidate.url(), true);
@@ -61,9 +67,10 @@ export class BrowserConnection {
 
     if (pageUrl) {
       const wanted = validateLocalUrl(pageUrl, true).href;
-      const selected = pages.find(candidate => new URL(candidate.url()).href === wanted);
-      if (!selected) throw new Error(`Local page not found: ${sanitizeUrl(pageUrl)}`);
-      return selected;
+      const selected = pages.filter(candidate => new URL(candidate.url()).href === wanted);
+      if (selected.length === 0) throw new Error(`Local page not found: ${sanitizeUrl(pageUrl)}`);
+      if (selected.length > 1) throw new Error(`Multiple localhost pages match pageUrl: ${sanitizeUrl(pageUrl)}`);
+      return selected[0]!;
     }
     if (pages.length === 0) throw new Error('No localhost page is attached to Chromium');
     if (pages.length > 1) {
@@ -74,18 +81,36 @@ export class BrowserConnection {
   }
 
   async close(): Promise<void> {
-    const browser = this.#browser;
+    this.#closed = true;
+    const current = this.#browser;
+    const connecting = this.#connecting;
     this.#browser = undefined;
-    await browser?.close();
+    const pending = await connecting?.catch(() => undefined);
+    if (this.#browser === pending) this.#browser = undefined;
+    await Promise.all([...new Set([current, pending].filter((browser): browser is Browser => !!browser))].map(browser => browser.close()));
   }
 
   async #connect(): Promise<Browser> {
+    if (this.#closed) throw new Error('Browser connection is closed');
     if (this.#browser?.isConnected()) return this.#browser;
-    const browser = await chromium.connectOverCDP(this.endpoint, { timeout: this.timeout });
-    this.#browser = browser;
-    browser.on('disconnected', () => {
-      this.#browser = undefined;
+    if (this.#connecting) return this.#connecting;
+
+    const connecting = this.connectOverCDP(this.endpoint, { timeout: this.timeout }).then(async browser => {
+      if (this.#closed) {
+        await browser.close();
+        throw new Error('Browser connection is closed');
+      }
+      this.#browser = browser;
+      browser.on('disconnected', () => {
+        if (this.#browser === browser) this.#browser = undefined;
+      });
+      return browser;
     });
-    return browser;
+    this.#connecting = connecting;
+    try {
+      return await connecting;
+    } finally {
+      if (this.#connecting === connecting) this.#connecting = undefined;
+    }
   }
 }

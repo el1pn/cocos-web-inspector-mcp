@@ -5,6 +5,7 @@ import { runBridge, type BridgeRequest } from './bridge.js';
 
 const pageUrl = z.url().optional();
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+const temporaryMutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 
 function response(data: unknown) {
   return {
@@ -19,7 +20,7 @@ function failure(error: unknown) {
 }
 
 export function createServer(browser: BrowserConnection): McpServer {
-  const server = new McpServer({ name: 'cocos-web-inspector-mcp', version: '0.1.0' });
+  const server = new McpServer({ name: 'cocos-web-inspector-mcp', version: '0.1.1' });
   const execute = async (request: BridgeRequest, selectedPage?: string) => {
     try {
       return response(await runBridge(await browser.page(selectedPage), request));
@@ -56,7 +57,7 @@ export function createServer(browser: BrowserConnection): McpServer {
   server.registerTool('cocos_highlight_node', {
     description: 'Temporarily draw a pointer-transparent DOM overlay around one Cocos UI node.',
     inputSchema: z.object({ pageUrl, uuid: z.string().min(1), durationMs: z.number().int().min(100).max(10_000).optional() }).strict(),
-    annotations: readOnly,
+    annotations: temporaryMutation,
   }, input => execute({ action: 'highlightNode', uuid: input.uuid, durationMs: input.durationMs }, input.pageUrl));
 
   return server;

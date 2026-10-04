@@ -1,7 +1,16 @@
 {
   "name": "cocos-web-inspector-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read-only MCP inspector for Cocos Creator 3.x running in local Chromium",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/el1pn/cocos-web-inspector-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/el1pn/cocos-web-inspector-mcp/issues"
+  },
+  "homepage": "https://github.com/el1pn/cocos-web-inspector-mcp#readme",
   "type": "module",
   "bin": {
     "cocos-web-inspector-mcp": "dist/src/index.js"
@@ -16,7 +25,13 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test dist/test/self-test.js",
+    "test:built": "node --test dist/test/self-test.js",
+    "test": "npm run build && npm run test:built",
+    "test:package": "node test/package-test.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prepack": "npm run clean && npm run build",
+    "check": "npm run build && npm run test:built && npm run test:package",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
     "start": "node dist/src/index.js"
   },
   "dependencies": {
