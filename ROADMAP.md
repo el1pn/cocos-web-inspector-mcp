@@ -283,7 +283,7 @@ Add only metrics available through stable, public Cocos APIs:
 
 Diagnostics must remain observational. They must not silently enable profiling systems or modify game configuration.
 
-## Phase 7 — Release readiness — CI/docs complete; compatibility matrix and release configuration pending handoff/setup
+## Phase 7 — Release readiness — CI/docs and 3.8.8 production compatibility complete; broader matrix pending handoff
 
 Before `1.0.0`:
 
@@ -292,7 +292,7 @@ Before `1.0.0`:
 - Inspector and debugger modes have separate, accurate MCP annotations.
 - Every mutation requires startup-time opt-in.
 - Every tool has strict schemas and bounded output.
-- Production/minified web builds are covered.
+- Production/minified web builds are covered. (Cocos Creator 3.8.8 Web Mobile fixture verified.)
 - Windows and Linux CI run the complete local gate.
 - Node.js LTS versions supported by the package are tested.
 - `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist.

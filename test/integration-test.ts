@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createServer as createHttpServer, type Server } from 'node:http';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import { extname, join, normalize, relative, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
@@ -11,6 +12,7 @@ import { BrowserConnection } from '../src/browser.js';
 import { createServer } from '../src/server.js';
 
 const fixtureRoot = resolve('test/fixtures/cocos-3.8.8');
+const productionFixtureRoot = resolve('test/fixtures/cocos-3.8.8-production');
 const contentTypes: Record<string, string> = {
   '.bin': 'application/octet-stream',
   '.css': 'text/css; charset=utf-8',
@@ -35,13 +37,13 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
 }
 
-function createFixtureServer(): Server {
+function createFixtureServer(root = fixtureRoot): Server {
   return createHttpServer(async (request, response) => {
     try {
       const pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname);
       const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
-      const file = normalize(join(fixtureRoot, relative));
-      if (file !== fixtureRoot && !file.startsWith(`${fixtureRoot}${sep}`)) throw new Error('Invalid fixture path');
+      const file = normalize(join(root, relative));
+      if (file !== root && !file.startsWith(`${root}${sep}`)) throw new Error('Invalid fixture path');
       if (!(await stat(file)).isFile()) throw new Error('Fixture path is not a file');
       response.writeHead(200, { 'content-type': contentTypes[extname(file)] ?? 'application/octet-stream' });
       response.end(await readFile(file));
@@ -49,6 +51,32 @@ function createFixtureServer(): Server {
       response.writeHead(404).end('Not found');
     }
   });
+}
+
+async function fixtureFiles(root: string, directory = root): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const nested = await Promise.all(entries.map(async entry => entry.isDirectory() ? fixtureFiles(root, join(directory, entry.name)) : [relative(root, join(directory, entry.name)).replaceAll('\\', '/')]));
+  return nested.flat().sort();
+}
+
+async function verifyProductionFixture(): Promise<void> {
+  const provenance = JSON.parse(await readFile(join(productionFixtureRoot, 'fixture-production-provenance.json'), 'utf8')) as { artifact: { creatorVersion: string; platform: string; debug: boolean; sourceMaps: boolean; fileCount: number } };
+  assert.deepEqual(provenance.artifact, {
+    path: 'build/inspector-web-production',
+    platform: 'web-mobile',
+    creatorVersion: '3.8.8',
+    debug: false,
+    sourceMaps: false,
+    entryScene: 'db://assets/scenes/InspectorTest.scene',
+    fileCount: 26,
+    checksumFile: 'build-production-checksums.sha256',
+    checksumAlgorithm: 'SHA256',
+    checksumExclusions: ['**/*.map', 'manual-check.png'],
+  });
+  const expected = new Map((await readFile(join(productionFixtureRoot, 'build-production-checksums.sha256'), 'utf8')).trim().split(/\r?\n/).map(line => [line.slice(66), line.slice(0, 64)]));
+  const files = (await fixtureFiles(productionFixtureRoot)).filter(file => !['README.md', 'COCOS-ENGINE-LICENSE.md', 'build-production.json', 'build-production-checksums.sha256', 'fixture-production-provenance.json'].includes(file));
+  assert.deepEqual(files, [...expected.keys()].sort());
+  for (const file of files) assert.equal(createHash('sha256').update(await readFile(join(productionFixtureRoot, file))).digest('hex'), expected.get(file), file);
 }
 
 async function reservePort(): Promise<number> {
@@ -105,6 +133,48 @@ function structured(result: Awaited<ReturnType<Client['callTool']>>): Record<str
 async function call(client: Client, name: string, args: Record<string, unknown>): Promise<Record<string, any>> {
   return structured(await client.callTool({ name, arguments: args }));
 }
+
+test('production fixture checksum and live Cocos canaries pass', { timeout: 90_000 }, async () => {
+  await verifyProductionFixture();
+  const fixtureServer = createFixtureServer(productionFixtureRoot);
+  const fixturePort = await listen(fixtureServer);
+  const cdpPort = await reservePort();
+  const profileRoot = await mkdtemp(join(tmpdir(), 'cocos-web-inspector-production-'));
+  let launched: { browser: Browser; context: BrowserContext } | undefined;
+  const browserConnection = new BrowserConnection(`http://127.0.0.1:${cdpPort}`);
+  const server = createServer(browserConnection, { allowRuntimeMutation: true });
+  const client = new Client({ name: 'production-integration-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const pageUrl = `http://127.0.0.1:${fixturePort}/`;
+  try {
+    launched = await launchBrowser(cdpPort, profileRoot);
+    const page = launched.context.pages()[0] ?? await launched.context.newPage();
+    await page.goto(pageUrl);
+    await waitForFixture(page);
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const tree = await call(client, 'cocos_scene_tree', { pageUrl, maxDepth: 6, maxNodes: 50 });
+    assert.equal(tree.scene.name, 'InspectorTest');
+    const panel = await call(client, 'cocos_find_node', { pageUrl, path: '/InspectorTest/Canvas/Panel' });
+    const panelUuid = panel.matches[0]?.uuid as string;
+    assert.ok(panelUuid);
+    const components = await call(client, 'cocos_get_components', { pageUrl, uuid: panelUuid });
+    const componentUuid = components.components[1]?.uuid as string;
+    assert.ok(componentUuid);
+    const properties = await call(client, 'cocos_get_properties', { pageUrl, uuid: panelUuid, componentUuid, maxDepth: 3 });
+    assert.equal(properties.properties.title, 'Inspector fixture');
+    assert.equal(properties.properties.count, 42);
+    assert.equal(properties.properties.featureEnabled, true);
+    assert.equal(properties.properties.details.category, 'manual-test');
+    assert.equal(JSON.stringify(properties).includes('must-not-be-returned'), false);
+    assert.equal(JSON.stringify(properties).includes('Property getter was invoked'), false);
+    assert.equal((await call(client, 'cocos_set_node_active', { pageUrl, uuid: panelUuid, active: false })).after.active, false);
+    assert.equal((await call(client, 'cocos_set_node_active', { pageUrl, uuid: panelUuid, active: true })).after.active, true);
+  } finally {
+    await Promise.allSettled([client.close(), server.close(), browserConnection.close(), launched?.context.close() ?? Promise.resolve()]);
+    await closeServer(fixtureServer).catch(() => undefined);
+    await rm(profileRoot, { recursive: true, force: true });
+  }
+});
 
 test('live Chromium exercises Cocos inspection, selection, highlight, and reconnect', { timeout: 90_000 }, async () => {
   const fixtureServer = createFixtureServer();

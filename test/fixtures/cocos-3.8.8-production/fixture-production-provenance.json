@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "artifact": {
+    "path": "build/inspector-web-production",
+    "platform": "web-mobile",
+    "creatorVersion": "3.8.8",
+    "debug": false,
+    "sourceMaps": false,
+    "entryScene": "db://assets/scenes/InspectorTest.scene",
+    "fileCount": 26,
+    "checksumFile": "build-production-checksums.sha256",
+    "checksumAlgorithm": "SHA256",
+    "checksumExclusions": [
+      "**/*.map",
+      "manual-check.png"
+    ]
+  },
+  "provenance": {
+    "sourceCommit": "ca4463a1da564578c07e61cbd75b1bb62404ffee",
+    "dirtyStateAtBuild": "untracked build-production.json",
+    "buildConfig": "build-production.json",
+    "buildCommand": "env -u ELECTRON_RUN_AS_NODE C:/ProgramData/cocos/editors/Creator/3.8.8/CocosCreator.exe --project <project> --build configPath=<windows-config-path>;platform=web-mobile"
+  },
+  "verification": {
+    "result": "PASS",
+    "runtime": {
+      "url": "http://127.0.0.1:8766/",
+      "scene": "InspectorTest",
+      "scenePaths": [
+        "/InspectorTest/Canvas/Panel",
+        "/InspectorTest/Canvas/Panel/TitleLabel",
+        "/InspectorTest/Canvas/Panel/TestButton",
+        "/InspectorTest/Canvas/UICamera"
+      ],
+      "components": {
+        "/InspectorTest/Canvas/Panel": [
+          "UITransform",
+          "InspectorFixture"
+        ],
+        "/InspectorTest/Canvas/Panel/TitleLabel": [
+          "UITransform",
+          "Label"
+        ],
+        "/InspectorTest/Canvas/Panel/TestButton": [
+          "UITransform",
+          "Button"
+        ],
+        "/InspectorTest/Canvas/UICamera": [
+          "UITransform",
+          "Camera"
+        ]
+      },
+      "canaries": {
+        "title": "Inspector fixture",
+        "count": 42,
+        "featureEnabled": true,
+        "detailsCategory": "manual-test",
+        "passwordRedacted": true,
+        "mustNotRunInvoked": false
+      }
+    }
+  }
+}
