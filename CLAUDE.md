@@ -9,6 +9,7 @@ npm install
 npm run build
 npm run typecheck
 npm test
+npm run check
 npm start
 npm start -- --cdp-endpoint http://127.0.0.1:9222
 ```
@@ -22,7 +23,7 @@ npm run build
 node --test --test-name-pattern="property serializer" dist/test/self-test.js
 ```
 
-Tests compile into `dist/test/self-test.js`; `npm test` always builds first.
+Tests compile into `dist/test/self-test.js`; `npm test` always builds first. `npm run check` is the full local gate: build, self-tests, and installed-package smoke test.
 
 ## Architecture
 
