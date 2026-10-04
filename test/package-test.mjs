@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const npm = process.env.npm_execpath;
 assert.ok(npm, 'npm_execpath is required; run this test through npm');
@@ -26,6 +28,15 @@ try {
   assert.equal(installed.bin['cocos-web-inspector-mcp'], 'dist/src/index.js');
 
   const executable = join(temporary, 'node_modules', 'cocos-web-inspector-mcp', installed.bin['cocos-web-inspector-mcp']);
+  const client = new Client({ name: 'package-test', version: '1.0.0' });
+  const transport = new StdioClientTransport({ command: process.execPath, args: [executable], cwd: temporary, stderr: 'pipe' });
+  try {
+    await client.connect(transport, { timeout: 10_000 });
+    assert.deepEqual(client.getServerVersion(), { name: 'cocos-web-inspector-mcp', version: installed.version });
+  } finally {
+    await client.close();
+  }
+
   const result = spawnSync(process.execPath, [executable, '--invalid-smoke-option'], { cwd: temporary, encoding: 'utf8', timeout: 10_000 });
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 1, result.stderr || result.stdout);

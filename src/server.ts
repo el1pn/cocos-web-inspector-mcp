@@ -1,8 +1,10 @@
+import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { BrowserConnection } from './browser.js';
 import { runBridge, type BridgeRequest } from './bridge.js';
 
+const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 const pageUrl = z.url().optional();
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const temporaryMutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
@@ -20,7 +22,7 @@ function failure(error: unknown) {
 }
 
 export function createServer(browser: BrowserConnection): McpServer {
-  const server = new McpServer({ name: 'cocos-web-inspector-mcp', version: '0.1.1' });
+  const server = new McpServer({ name: 'cocos-web-inspector-mcp', version });
   const execute = async (request: BridgeRequest, selectedPage?: string) => {
     try {
       return response(await runBridge(await browser.page(selectedPage), request));
