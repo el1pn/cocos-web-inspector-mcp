@@ -4,6 +4,8 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.2
+
 ### Added
 
 - Bounded Cocos runtime inspection, discovery, diagnostics, visual bounds, and viewport-clipped node capture.
