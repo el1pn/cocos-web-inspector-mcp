@@ -30,23 +30,16 @@ Keep this browser profile separate from normal browsing. CDP provides code-execu
 
 ## Install and run
 
-Clone the repository, then install and build it:
+Run the published npm package with the default CDP endpoint, `http://127.0.0.1:9222`:
 
 ```powershell
-npm install
-npm run build
-```
-
-Run with the default CDP endpoint, `http://127.0.0.1:9222`:
-
-```powershell
-npm start
+npx --yes cocos-web-inspector-mcp
 ```
 
 Run with an explicit endpoint:
 
 ```powershell
-npm start -- --cdp-endpoint http://127.0.0.1:9222
+npx --yes cocos-web-inspector-mcp --cdp-endpoint http://127.0.0.1:9222
 ```
 
 Endpoint precedence is:
@@ -61,15 +54,16 @@ The server uses stdio for MCP. Standard output is reserved for protocol traffic;
 
 ## MCP configuration
 
-Build the project first, then replace `<absolute-path-to-repository>` with the cloned repository path:
+Use the published npm package directly:
 
 ```json
 {
   "mcpServers": {
     "cocos-web-inspector": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "<absolute-path-to-repository>/dist/src/index.js",
+        "--yes",
+        "cocos-web-inspector-mcp",
         "--cdp-endpoint",
         "http://127.0.0.1:9222"
       ]
@@ -78,16 +72,14 @@ Build the project first, then replace `<absolute-path-to-repository>` with the c
 }
 ```
 
-Forward slashes work in Windows JSON paths. If backslashes are used, escape each one as `\\`.
-
 The endpoint may instead be provided through the MCP process environment:
 
 ```json
 {
   "mcpServers": {
     "cocos-web-inspector": {
-      "command": "node",
-      "args": ["<absolute-path-to-repository>/dist/src/index.js"],
+      "command": "npx",
+      "args": ["--yes", "cocos-web-inspector-mcp"],
       "env": {
         "COCOS_CDP_ENDPOINT": "http://127.0.0.1:9222"
       }
