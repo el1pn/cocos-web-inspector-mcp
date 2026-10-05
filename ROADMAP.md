@@ -296,7 +296,7 @@ Before `1.0.0`:
 - Windows and Linux CI run the complete local gate.
 - Node.js LTS versions supported by the package are tested. (Done: CI runs Node.js 20, 22, and 24 on Ubuntu and Windows.)
 - `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist. (Done.)
-- npm releases use a reviewed automated workflow and provenance where supported. (Workflow done; provenance blocked while the repository is private.)
+- npm releases use a reviewed automated workflow and provenance where supported. (Done: reviewed `npm` environment, tag-only deploys, provenance.)
 
 ## Non-goals
 

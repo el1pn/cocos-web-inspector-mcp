@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## Unreleased
 
+### Changed
+
+- Releases publish with npm provenance and require reviewer approval of the `npm` environment; the repository is public.
+- Package description covers both inspector and runtime debugger modes.
+
 ## 0.1.8
 
 ### Added
