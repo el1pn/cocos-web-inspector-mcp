@@ -207,7 +207,10 @@ The test suite covers URL policy, CDP connection reuse and recovery, scene trave
 - `MULTIPLE_PAGES`: call `cocos_list_pages`, then pass the exact reported `pageUrl`. If tabs share one URL, close duplicates or use a separate Chromium per project (see Page selection).
 - `COCOS_NOT_FOUND` or `SCENE_NOT_READY`: wait for the web build to finish loading; use `cocos_runtime_info` after the active scene exists.
 - Runtime mutation tools missing: restart the server with `--allow-runtime-mutation`; a tool call cannot enable this mode.
-- Bounds/capture unavailable: select a visible UI node with `UITransform`. Capture is viewport-only, bounded, and never falls back to a full-page screenshot.
+- Bounds/capture unavailable: select a visible UI node with `UITransform`. `INACTIVE` means the node or an ancestor is inactive. Capture is viewport-only, bounded, and never falls back to a full-page screenshot; `RESPONSE_LIMIT` means even a 0.25× JPEG exceeded the response budget, so capture a smaller node.
+- `cocos_snapshot_subtree` returns `RESPONSE_LIMIT` with a partial tree: snapshot a deeper node, or lower `maxDepth`.
+- `cocos_step_frame` returns `INVALID_MUTATION`: call `cocos_pause` first.
+- Render metrics `fps` reads 0: the engine publishes FPS once per elapsed second, so read again after the scene has run for a second.
 
 ## Release and compatibility
 

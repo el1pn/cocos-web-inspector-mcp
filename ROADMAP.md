@@ -295,8 +295,8 @@ Before `1.0.0`:
 - Production/minified web builds are covered. (Cocos Creator 3.8.8 Web Mobile fixture verified.)
 - Windows and Linux CI run the complete local gate.
 - Node.js LTS versions supported by the package are tested. (Done: CI runs Node.js 20, 22, and 24 on Ubuntu and Windows.)
-- `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist.
-- npm releases use a reviewed automated workflow and provenance where supported.
+- `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist. (Done.)
+- npm releases use a reviewed automated workflow and provenance where supported. (Workflow done; provenance blocked while the repository is private.)
 
 ## Non-goals
 
