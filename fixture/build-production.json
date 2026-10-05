@@ -1,0 +1,21 @@
+{
+  "platform": "web-mobile",
+  "buildPath": "project://build",
+  "debug": false,
+  "md5Cache": false,
+  "sourceMaps": false,
+  "outputName": "inspector-web-production",
+  "taskName": "inspector-web-production",
+  "startScene": "64fcba57-76ff-4d9a-af4d-3e9dcc172197",
+  "scenes": [
+    {
+      "url": "db://assets/scenes/InspectorTest.scene",
+      "uuid": "64fcba57-76ff-4d9a-af4d-3e9dcc172197"
+    }
+  ],
+  "packages": {
+    "web-mobile": {
+      "orientation": "landscape"
+    }
+  }
+}

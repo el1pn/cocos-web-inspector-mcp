@@ -1,0 +1,113 @@
+{
+  "contractVersion": 1,
+  "creatorVersion": "3.8.8",
+  "entryScene": "assets/scenes/InspectorTest.scene",
+  "runtime": {
+    "scenePaths": {
+      "Canvas": [
+        "cc.UITransform",
+        "cc.Canvas"
+      ],
+      "Canvas/Panel": [
+        "cc.UITransform",
+        "InspectorFixture"
+      ],
+      "Canvas/Panel/TitleLabel": [
+        "cc.UITransform",
+        "cc.Label"
+      ],
+      "Canvas/Panel/TestButton": [
+        "cc.UITransform",
+        "cc.Sprite",
+        "cc.Button"
+      ],
+      "Canvas/UICamera": [
+        "cc.UITransform",
+        "cc.Camera"
+      ],
+      "Canvas/Panel/IconSprite": [
+        "cc.UITransform",
+        "cc.Sprite"
+      ],
+      "Canvas/Panel/TestToggle": [
+        "cc.UITransform",
+        "cc.Sprite",
+        "cc.Toggle"
+      ],
+      "Canvas/Panel/TestRichText": [
+        "cc.UITransform",
+        "cc.RichText"
+      ]
+    },
+    "canaries": {
+      "publicValues": {
+        "Canvas/Panel.InspectorFixture.title": "Inspector fixture",
+        "Canvas/Panel.InspectorFixture.count": 42,
+        "Canvas/Panel.InspectorFixture.featureEnabled": true,
+        "Canvas/Panel.InspectorFixture.details.category": "manual-test"
+      },
+      "redaction": {
+        "property": "Canvas/Panel.InspectorFixture.details.password",
+        "forbiddenValue": "must-not-be-returned"
+      },
+      "getterSafety": {
+        "property": "Canvas/Panel.InspectorFixture.mustNotRun",
+        "mustInvoke": false,
+        "forbiddenError": "Property getter was invoked"
+      },
+      "displayValues": {
+        "Canvas/Panel/TitleLabel.Label.string": "Inspector title",
+        "Canvas/Panel/TestButton.Button.interactable": true,
+        "Canvas/Panel/IconSprite.Sprite.spriteFrame.name": "default_sprite_splash",
+        "Canvas/Panel/TestToggle.Toggle.isChecked": true,
+        "Canvas/Panel/TestRichText.RichText.string": "<b>Rich</b> fixture"
+      }
+    }
+  },
+  "build": {
+    "platform": "web-mobile",
+    "outputDirectory": "build/inspector-web",
+    "steps": [
+      "See README.md: import once in the GUI Editor, then CLI-build build-dev.json and build-production.json."
+    ],
+    "expectedFiles": [
+      "index.html",
+      "application.js",
+      "src/settings.json",
+      "assets/main/config.json"
+    ],
+    "artifactExclusions": [
+      "**/*.map",
+      "manual-check.png"
+    ]
+  },
+  "verification": [
+    "Confirm every build.expectedFiles path exists below build.outputDirectory.",
+    "Confirm src/settings.json launches db://assets/scenes/InspectorTest.scene.",
+    "Serve the build in Chromium with CDP on port 9222, then verify runtime.scenePaths and runtime.canaries through cocos-web-inspector.",
+    "Run git diff --check."
+  ],
+  "checksumHandoff": {
+    "algorithm": "SHA256",
+    "scope": "build/inspector-web",
+    "exclude": [
+      "**/*.map",
+      "manual-check.png"
+    ],
+    "pathFormat": "Forward-slash paths relative to build/inspector-web",
+    "ordering": "Ordinal ascending by relative path",
+    "lineFormat": "<lowercase-sha256>  <relative-path>",
+    "requiredStatus": [
+      "creatorVersion",
+      "platform",
+      "sourceCommit",
+      "dirtyState",
+      "verificationResult",
+      "fileCount"
+    ],
+    "requiredFiles": [
+      "fixture-manifest.json",
+      "build-checksums.sha256"
+    ]
+  }
+}
