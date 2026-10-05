@@ -37,14 +37,25 @@ export async function captureNode(page: Page, uuid: string): Promise<unknown> {
   const result = await page.evaluate(inspectCocos, { action: 'getNodeBounds', uuid } satisfies BridgeRequest) as any;
   if (!result.available || !result.visible) return { captured: false, reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
   const clip = result.clippedViewport;
-  if (!clip || !Number.isFinite(clip.x) || !Number.isFinite(clip.y) || !Number.isFinite(clip.width) || !Number.isFinite(clip.height) || clip.width <= 0 || clip.height <= 0 || clip.width > 1_024 || clip.height > 1_024 || clip.width * clip.height > 1_048_576) return { captured: false, reason: 'CAPTURE_LIMIT' };
-  // ponytail: device-pixel PNG, then CSS-pixel JPEG quality steps; add CDP clip.scale downscaling if captures still hit the limit.
+  if (!clip || !Number.isFinite(clip.x) || !Number.isFinite(clip.y) || !Number.isFinite(clip.width) || !Number.isFinite(clip.height) || clip.width <= 0 || clip.height <= 0) return { captured: false, reason: 'INVALID_GEOMETRY' };
+  const fits = (data: string) => Buffer.byteLength(JSON.stringify({ data }), 'utf8') <= MAX_BYTES - 4_096;
+  const size = { width: Math.round(clip.width), height: Math.round(clip.height) };
+  // Device-pixel PNG, then CSS-pixel JPEG quality steps.
   const attempts: Array<{ type: 'png' | 'jpeg'; quality?: number; scale: 'device' | 'css' }> = [{ type: 'png', scale: 'device' }, ...[80, 60, 40].map(quality => ({ type: 'jpeg' as const, quality, scale: 'css' as const }))];
   for (const options of attempts) {
     const data = (await page.screenshot({ ...options, clip })).toString('base64');
-    if (Buffer.byteLength(JSON.stringify({ data }), 'utf8') <= MAX_BYTES - 4_096) {
-      return { captured: true, mimeType: `image/${options.type}`, data, width: Math.round(clip.width), height: Math.round(clip.height) };
+    if (fits(data)) return { captured: true, mimeType: `image/${options.type}`, data, ...size };
+  }
+  // Playwright has no output scale, so downscale through CDP; its clip is document-relative.
+  const session = await page.context().newCDPSession(page);
+  try {
+    const [scrollX, scrollY] = await page.evaluate(() => [window.scrollX, window.scrollY]);
+    for (const scale of [0.75, 0.5, 0.35, 0.25]) {
+      const { data } = await session.send('Page.captureScreenshot', { format: 'jpeg', quality: 60, clip: { x: clip.x + scrollX, y: clip.y + scrollY, width: clip.width, height: clip.height, scale } });
+      if (fits(data)) return { captured: true, mimeType: 'image/jpeg', data, ...size, scale };
     }
+  } finally {
+    await session.detach().catch(() => {});
   }
   return { captured: false, reason: 'RESPONSE_LIMIT' };
 }
@@ -210,7 +221,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
       : { x: canvasRect.left + (worldX - Number(origin.x ?? 0)) * canvasRect.width / Number(visible.width), y: canvasRect.top + (Number(origin.y ?? 0) + Number(visible.height) - worldY - worldHeight) * canvasRect.height / Number(visible.height), width: worldWidth * canvasRect.width / Number(visible.width), height: worldHeight * canvasRect.height / Number(visible.height) };
     if (!Object.values(viewport).every(Number.isFinite) || viewport.width <= 0 || viewport.height <= 0) return { available: false, reason: 'INVALID_GEOMETRY' };
     const clipped = { x: Math.max(0, viewport.x), y: Math.max(0, viewport.y), width: Math.max(0, Math.min(innerWidth, viewport.x + viewport.width) - Math.max(0, viewport.x)), height: Math.max(0, Math.min(innerHeight, viewport.y + viewport.height) - Math.max(0, viewport.y)) };
-    return { available: true, canvas: { x: worldX, y: worldY, width: worldWidth, height: worldHeight }, viewport, clippedViewport: clipped, anchor: { x: Number(transform.anchorPoint.x), y: Number(transform.anchorPoint.y) }, worldPosition: { x: Number(position.x), y: Number(position.y), z: Number(position.z ?? 0) }, visible: clipped.width > 0 && clipped.height > 0, outsideViewport: clipped.width === 0 || clipped.height === 0 };
+    const inactive = node.activeInHierarchy === false;
+    return { available: true, canvas: { x: worldX, y: worldY, width: worldWidth, height: worldHeight }, viewport, clippedViewport: clipped, anchor: { x: Number(transform.anchorPoint.x), y: Number(transform.anchorPoint.y) }, worldPosition: { x: Number(position.x), y: Number(position.y), z: Number(position.z ?? 0) }, visible: !inactive && clipped.width > 0 && clipped.height > 0, outsideViewport: clipped.width === 0 || clipped.height === 0, ...(inactive ? { reason: 'INACTIVE' } : {}) };
   };
 
   if (request.action === 'runtimeInfo') {
@@ -345,17 +357,24 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const maxDepth = Math.min(Math.max(request.maxDepth ?? 6, 0), 20);
     const maxNodes = Math.min(Math.max(request.maxNodes ?? 500, 1), 5_000);
     let count = 0;
+    // ponytail: the MCP response carries text and structuredContent, so ~70 KB of JSON (escaped text + structured copy) fits runBridge's ceiling; stop early instead of dropping everything.
+    let bytes = 0;
     const reasons = new Set<string>();
     const build = (node: any, depth: number): any => {
       if (count >= maxNodes) {
         reasons.add('NODE_LIMIT');
         return undefined;
       }
-      count++;
       const item: any = {
         ...summary(node),
         components: components(node).slice(0, 200).map(component => ({ type: componentName(component), uuid: String(component.uuid ?? ''), enabled: component.enabled !== false })),
       };
+      bytes += JSON.stringify(item).length;
+      if (bytes > 70_000) {
+        reasons.add('RESPONSE_LIMIT');
+        return undefined;
+      }
+      count++;
       if (components(node).length > 200) reasons.add('NODE_LIMIT');
       if (depth >= maxDepth) {
         if (children(node).length) reasons.add('MAX_DEPTH');
@@ -406,11 +425,15 @@ export function inspectCocos(request: BridgeRequest): unknown {
         return value.slice(0, 2_000);
       }
       if (typeof value !== 'object') return undefined;
-      const uuid = dataProperty(value, 'uuid');
-      if (reference && uuid && Array.isArray(dataProperty(value, 'children'))) {
-        return { $type: 'Node', uuid: String(uuid), name: String(dataProperty(value, 'name') ?? '').slice(0, 500) };
+      // Cocos 3.x exposes uuid/children/name as accessors; read their backing fields instead.
+      const uuid = dataProperty(value, 'uuid') ?? dataProperty(value, '_id');
+      if (reference && uuid && Array.isArray(dataProperty(value, 'children') ?? dataProperty(value, '_children'))) {
+        return { $type: 'Node', uuid: String(uuid), name: String(dataProperty(value, 'name') ?? dataProperty(value, '_name') ?? '').slice(0, 500) };
       }
       if (reference && uuid && dataProperty(value, 'node')) return { $type: 'Component', uuid: String(uuid), type: componentName(value) };
+      if (reference && typeof cc.Asset === 'function' && value instanceof cc.Asset) {
+        return { $type: componentName(value), name: String(dataProperty(value, '_name') ?? '').slice(0, 500), uuid: String(dataProperty(value, '_uuid') ?? '') };
+      }
       if (depth > 0 && depth >= maxDepth) {
         truncate('MAX_DEPTH');
         return '[MaxDepth]';
@@ -474,6 +497,12 @@ export function inspectCocos(request: BridgeRequest): unknown {
     readDisplay('RichText', 'string', '_string');
     readDisplay('Button', 'interactable', '_interactable');
     readDisplay('Toggle', 'isChecked', '_isChecked');
+    if (selected === node) {
+      for (const key of ['name', 'active', 'activeInHierarchy']) {
+        const value = dataProperty(node, key) ?? dataProperty(node, `_${key}`);
+        if (typeof value === 'string' || typeof value === 'boolean') displayFields[key] = typeof value === 'string' ? value.slice(0, 500) : value;
+      }
+    }
     if (typeof cc.Sprite === 'function' && selected instanceof cc.Sprite) {
       const frame = dataProperty(selected, '_spriteFrame');
       displayFields.spriteFrame = frame && typeof frame === 'object'

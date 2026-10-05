@@ -3,7 +3,7 @@ import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { sanitizeUrl, validateLocalUrl, BrowserConnection } from '../src/browser.js';
-import { inspectCocos, runBridge } from '../src/bridge.js';
+import { captureNode, inspectCocos, runBridge } from '../src/bridge.js';
 import { createServer } from '../src/server.js';
 
 function fakeBrowser(pageUrl = 'http://localhost:3000') {
@@ -221,6 +221,14 @@ test('property serializer avoids getters, secrets, and cycles', () => withFakeCo
   node.accessorReference = accessorReference;
   const prototypeReference = Object.create({ uuid: 'prototype-node', children: [], name: 'Prototype Node' });
   node.prototypeReference = prototypeReference;
+  // Real Cocos 3.x: uuid/children/name are prototype accessors over _id/_children/_name.
+  class EngineNode { _id = 'engine-node'; _name = 'Engine Node'; _children = []; }
+  class EngineComponent { _id = 'engine-comp'; node = new EngineNode(); }
+  for (const proto of [EngineNode.prototype, EngineComponent.prototype]) {
+    for (const key of ['uuid', 'children', 'name']) Object.defineProperty(proto, key, { get: () => { throw new Error('engine getter ran'); } });
+  }
+  node.engineNode = new EngineNode();
+  node.engineComponent = new EngineComponent();
   const result = inspectCocos({ action: 'getProperties', uuid: 'child-1', maxDepth: 3 }) as any;
   const json = JSON.stringify(result);
   assert.equal(result.properties.publicValue, 7);
@@ -232,7 +240,49 @@ test('property serializer avoids getters, secrets, and cycles', () => withFakeCo
   assert.deepEqual(result.properties.accessorReference, {});
   assert.deepEqual(result.properties.prototypeReference, { $type: 'Node', uuid: 'prototype-node', name: 'Prototype Node' });
   assert.equal(result.properties.loop.$type, 'Node');
+  assert.deepEqual(result.properties.engineNode, { $type: 'Node', uuid: 'engine-node', name: 'Engine Node' });
+  assert.deepEqual(result.properties.engineComponent, { $type: 'Component', uuid: 'engine-comp', type: 'EngineComponent' });
 }));
+
+test('snapshot stops at the byte budget and asset references collapse', () => withFakeCocos(() => {
+  const cc = (globalThis as any).cc;
+  const scene = cc.director.getScene();
+  scene.children = Array.from({ length: 2_000 }, (_value, index) => ({ uuid: `n-${index}`, name: 'x'.repeat(100), children: [], components: [] }));
+  const snapshot = inspectCocos({ action: 'snapshotSubtree', uuid: 'scene-1', maxDepth: 2, maxNodes: 5_000 }) as any;
+  assert.ok(snapshot.snapshot.children.length > 100 && snapshot.snapshot.children.length < 2_000);
+  assert.deepEqual(snapshot.truncationReasons, ['RESPONSE_LIMIT']);
+
+  class Asset {}
+  class SpriteFrame extends Asset { _name = 'coin'; _uuid = 'frame-1'; vertices = { uv: [0, 1] }; }
+  cc.Asset = Asset;
+  const holder = { uuid: 'holder', name: 'Holder', children: [], components: [], frame: new SpriteFrame() };
+  scene.children = [holder];
+  const props = (inspectCocos({ action: 'getProperties', uuid: 'holder', maxDepth: 3 }) as any).properties;
+  assert.deepEqual(props.frame, { $type: 'SpriteFrame', name: 'coin', uuid: 'frame-1' });
+}));
+
+test('capture downscales through CDP when quality steps still exceed the limit', async () => {
+  const scales: number[] = [];
+  const page: any = {
+    evaluate: async (_fn: unknown, request?: unknown) => request
+      ? { available: true, visible: true, clippedViewport: { x: 10, y: 20, width: 2_000, height: 1_000 } }
+      : [0, 5],
+    screenshot: async () => Buffer.alloc(300_000),
+    context: () => ({
+      newCDPSession: async () => ({
+        send: async (_method: string, params: any) => {
+          scales.push(params.clip.scale);
+          assert.equal(params.clip.y, 25);
+          return { data: 'x'.repeat(params.clip.scale > 0.5 ? 300_000 : 1_000) };
+        },
+        detach: async () => {},
+      }),
+    }),
+  };
+  const result = await captureNode(page, 'node') as any;
+  assert.deepEqual(scales, [0.75, 0.5]);
+  assert.deepEqual({ ...result, data: undefined }, { captured: true, mimeType: 'image/jpeg', data: undefined, width: 2_000, height: 1_000, scale: 0.5 });
+});
 
 test('scene tree stops traversing once maxNodes is reached', () => withFakeCocos(() => {
   const scene = (globalThis as any).cc.director.getScene();

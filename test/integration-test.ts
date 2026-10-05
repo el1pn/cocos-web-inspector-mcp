@@ -227,6 +227,11 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
       runtimeOnly: true,
     });
     assert.equal((await call(client, 'cocos_find_node', { pageUrl, uuid: panelUuid })).matches[0].active, false);
+    assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, key: 'active', equals: false, timeoutMs: 300 })).matched, true);
+    const hidden = await call(client, 'cocos_get_node_bounds', { pageUrl, uuid: panelUuid });
+    assert.equal(hidden.visible, false);
+    assert.equal(hidden.reason, 'INACTIVE');
+    assert.equal((await call(client, 'cocos_click_node', { pageUrl, uuid: panelUuid })).clicked, false);
     assert.deepEqual(await call(client, 'cocos_set_node_active', { pageUrl, uuid: panelUuid, active: true }), {
       changed: true,
       target: { nodeUuid: panelUuid },

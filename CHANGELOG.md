@@ -4,6 +4,21 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.7
+
+### Changed
+
+- `cocos_capture_node` drops the arbitrary 1,024 px / 1,048,576 px cap; captures stay bounded by the visible viewport and the encoded response limit. Degenerate clips now report `INVALID_GEOMETRY` instead of `CAPTURE_LIMIT`.
+- `cocos_capture_node` downscales through CDP (`scale` 0.75 → 0.25, JPEG) when quality steps alone exceed the response limit, so large or high-DPI viewports still capture; the result reports the applied `scale`.
+
+### Fixed
+
+- `cocos_get_properties` returns real Cocos 3.x node and component references as `{ $type, uuid, ... }` instead of `"[MaxDepth]"`; engine `uuid`/`children`/`name` are accessors, so references now read `_id`/`_children`/`_name`.
+- Node property reads include `name`, `active`, and `activeInHierarchy`, so `cocos_wait_for_property` can wait on a node's `active` state.
+- Asset references (`SpriteFrame`, ...) inside component properties collapse to `{ $type, name, uuid }` instead of dumping vertex/UV data.
+- `cocos_snapshot_subtree` stops at a byte budget and returns the partial tree with `RESPONSE_LIMIT`, instead of an empty response on large scenes.
+- Bounds of nodes inactive in hierarchy report `visible: false` with reason `INACTIVE`; capture and click refuse them instead of hitting whatever renders underneath.
+
 ## 0.1.6
 
 ### Added
