@@ -16,10 +16,10 @@
     ]
   },
   "provenance": {
-    "sourceCommit": "58fec3ca0daaafa35f2470fb4785319ee0535cbc",
+    "sourceCommit": "c818decf82960e829f6a74e3760d4cd027b8ba39",
     "dirtyStateAtBuild": "clean",
     "buildConfig": "build-production.json",
-    "buildCommand": "env -u ELECTRON_RUN_AS_NODE /Applications/Cocos/Creator/3.8.8/CocosCreator.app/Contents/MacOS/CocosCreator --project <project> --build configPath=<project>/build-production.json"
+    "buildCommand": "fixture/build.sh 3.8.8"
   },
   "verification": {
     "result": "PASS",

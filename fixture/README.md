@@ -1,6 +1,6 @@
-# cocos-web-inspector-fixture
+# Cocos fixture project
 
-Cocos Creator 3.8.8 project that produces the vendored web builds used by `cocos-web-inspector-mcp` integration tests.
+Cocos Creator 3.8.8 project that produces the vendored web builds in `test/fixtures/` used by the integration tests.
 
 `assets/scenes/InspectorTest.scene` holds the canaries listed in `fixture-manifest.json`: the `InspectorFixture` component (public values, a redacted `details.password`, a throwing `mustNotRun` getter) and one each of Label, Button, Sprite, Toggle, and RichText.
 
@@ -14,18 +14,20 @@ python3 tools/gen-scene.py tools/samples.json
 
 ## Build
 
-The first import must happen in the GUI Editor. On an empty `library/`, the headless CLI often starts without the `scene`/`typescript` importers, rewrites their `.meta` files to `"importer": "*"`, and emits a build with no scene or scripts.
-
-1. Open the project once in Creator 3.8.8 GUI, wait for import, close it.
-2. Build both variants:
+From the repository root, with every Cocos Creator closed:
 
 ```sh
-for cfg in build-dev build-production; do
-  env -u ELECTRON_RUN_AS_NODE /Applications/Cocos/Creator/3.8.8/CocosCreator.app/Contents/MacOS/CocosCreator \
-    --project "$PWD" --build "configPath=$PWD/$cfg.json"
-done
+fixture/build.sh            # 3.8.8: rebuilds and vendors test/fixtures/cocos-3.8.8 and -production
+fixture/build.sh 3.7.4      # other versions: vendors test/fixtures/cocos-3.7.4 for manual checks (git-ignored)
+npm run check
 ```
 
-3. Verify each `build/*/src/settings.json` has non-empty `engine.builtinAssets` and `scripting.scriptPackages`, and that no `.meta` reads `"importer": "*"`. Rebuild if not.
+The script copies the committed `fixture/` to `~/.cache/cocos-web-inspector-fixture/<version>`, builds headlessly, rejects broken imports (`Missing class`, `"importer": "*"`, or a build without scenes/scripts), and rewrites the vendored files and SHA-256 manifest. Set `COCOS_CREATOR` for a non-default Creator path.
 
-Outputs: `build/inspector-web` (debug) and `build/inspector-web-production`.
+Pitfalls it avoids:
+
+- A project under `/tmp` (a symlink to `/private/tmp` on macOS) makes Creator 3.8.x drop custom scripts.
+- Another running Creator, or a CI runner that kills every Creator, corrupts headless imports.
+- VS Code terminals export `ELECTRON_RUN_AS_NODE`, which makes Creator reject `--project`.
+
+Commit `fixture/` changes before building; the vendored provenance records that commit.

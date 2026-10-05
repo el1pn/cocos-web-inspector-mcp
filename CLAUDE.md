@@ -60,13 +60,10 @@ TypeScript uses `NodeNext`, strict mode, `noUncheckedIndexedAccess`, and `exactO
 
 ## Fixture builds
 
-The Cocos fixture project (scene, `InspectorFixture` component, build configs) is not published. This repository owns the vendored integration-test snapshots, browser harness, MCP assertions, scripts, and CI; contributors test against those snapshots locally.
+`fixture/` is the Cocos Creator project behind the vendored integration snapshots in `test/fixtures/`. Creator cannot run in CI, so CI tests the vendored builds; contributors with Creator rebuild them locally.
 
-Fixture build workflow, for maintainers with the fixture project:
+1. Regenerate the scene with `cd fixture && python3 tools/gen-scene.py tools/samples.json` when the canary contract changes.
+2. Commit `fixture/`, close every Cocos Creator, then run `fixture/build.sh` (3.8.8 by default). It builds headlessly outside `/tmp`, rejects broken imports, and rewrites the vendored files and checksums.
+3. Update the provenance notes beside each snapshot and run `npm run check`.
 
-1. Regenerate the scene with `python3 tools/gen-scene.py tools/samples.json` when the canary contract changes.
-2. On an empty `library/`, open the project once in the Creator 3.8.8 GUI to import, then close it. The headless CLI often starts without the `scene`/`typescript` importers and rewrites their `.meta` files to `"importer": "*"`.
-3. CLI-build `build-dev.json` and `build-production.json`; confirm each `src/settings.json` has non-empty `engine.builtinAssets` and `scripting.scriptPackages`.
-4. Verify the canaries live in Chrome through this MCP server before vendoring.
-
-Vendored Cocos builds are generated artifacts. Do not hand-edit them. Copy them from the fixture build output, regenerate the SHA-256 manifest beside each snapshot, and record the fixture source commit in its provenance.
+Vendored Cocos builds are generated artifacts. Do not hand-edit them; rebuild with `fixture/build.sh` and record the fixture source commit in their provenance.
