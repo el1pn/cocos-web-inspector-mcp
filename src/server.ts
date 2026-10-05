@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
-import { captureNode, inspectCocosPage, runBridge, type BridgeRequest } from './bridge.js';
+import { captureNode, clickNode, inspectCocosPage, runBridge, type BridgeRequest } from './bridge.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 const pageUrl = z.url().optional();
@@ -32,12 +32,15 @@ function response(data: unknown) {
 
 function failure(error: unknown) {
   if (error instanceof InspectorError) return { ...response({ code: error.code, message: error.message }), isError: true };
-  const message = error instanceof Error ? error.message : 'Inspector request failed';
+  const raw = error instanceof Error ? error.message : 'Inspector request failed';
+  // Playwright wraps in-page errors as "page.evaluate: Error: <message>\n<stack>".
+  const message = raw.replace(/^page\.evaluate: (?:Error: )?/, '').split('\n')[0]!;
   const code = message === 'Cocos Creator 3.x runtime not found' ? 'COCOS_NOT_FOUND'
     : message === 'Active Cocos scene not found' ? 'SCENE_NOT_READY'
       : message.startsWith('Node not found') ? 'NODE_NOT_FOUND'
         : message === 'Component not found' ? 'COMPONENT_NOT_FOUND'
           : message === 'Ambiguous component type' ? 'AMBIGUOUS_COMPONENT'
+            : message.startsWith('Invalid mutation') ? 'INVALID_MUTATION'
             : 'CDP_UNAVAILABLE';
   return { ...response({ code, message }), isError: true };
 }
@@ -137,6 +140,30 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
     annotations: readOnly,
   }, input => execute({ action: 'getProperties', uuid: input.uuid, componentType: input.componentType, componentUuid: input.componentUuid, maxDepth: input.maxDepth }, input.pageUrl));
 
+  server.registerTool('cocos_wait_for_property', {
+    description: 'Poll one top-level property of a Cocos node or component until it equals a value or the timeout passes.',
+    inputSchema: z.object({ pageUrl, uuid: z.string().min(1), componentType: z.string().min(1).optional(), componentUuid: z.string().min(1).optional(), key: z.string().min(1).max(200), equals: z.union([z.boolean(), finiteNumber, z.string().max(2_000), z.null()]), timeoutMs: z.number().int().min(100).max(30_000).optional(), intervalMs: z.number().int().min(50).max(5_000).optional() }).strict()
+      .refine(value => !(value.componentType && value.componentUuid), 'Provide componentType or componentUuid, not both'),
+    annotations: readOnly,
+  }, async input => {
+    try {
+      const page = await browser.page(input.pageUrl);
+      const request: BridgeRequest = { action: 'getProperties', uuid: input.uuid, componentType: input.componentType, componentUuid: input.componentUuid, maxDepth: 0 };
+      const deadline = Date.now() + (input.timeoutMs ?? 5_000);
+      let polls = 0;
+      let value: unknown;
+      for (;;) {
+        polls++;
+        value = ((await runBridge(page, request)) as { properties?: Record<string, unknown> }).properties?.[input.key];
+        if (value === input.equals || Date.now() >= deadline) break;
+        await new Promise(resolve => setTimeout(resolve, input.intervalMs ?? 200));
+      }
+      return response({ matched: value === input.equals, key: input.key, value: value ?? null, polls });
+    } catch (error) {
+      return failure(error);
+    }
+  });
+
   if (options.allowRuntimeMutation) {
     server.registerTool('cocos_set_node_active', {
       description: 'Set the active state of one Cocos node selected by exact UUID.',
@@ -156,6 +183,18 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
       inputSchema: z.object({ pageUrl, uuid: z.string().min(1), componentUuid: z.string().min(1), key: z.string().min(1).max(200), value: propertyValue }).strict(),
       annotations: runtimeMutation,
     }, input => execute({ action: 'setProperty', uuid: input.uuid, componentUuid: input.componentUuid, key: input.key, value: input.value }, input.pageUrl));
+
+    server.registerTool('cocos_click_node', {
+      description: 'Dispatch a real mouse click at the visible center of one Cocos UI node, so Button and touch handlers run.',
+      inputSchema: z.object({ pageUrl, uuid: z.string().min(1) }).strict(),
+      annotations: { ...runtimeMutation, idempotentHint: false },
+    }, async input => {
+      try {
+        return response(await clickNode(await browser.page(input.pageUrl), input.uuid));
+      } catch (error) {
+        return failure(error);
+      }
+    });
 
     for (const action of ['pause', 'resume'] as const) {
       server.registerTool(`cocos_${action}`, {

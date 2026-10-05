@@ -68,7 +68,7 @@ async function verifyProductionFixture(): Promise<void> {
     debug: false,
     sourceMaps: false,
     entryScene: 'db://assets/scenes/InspectorTest.scene',
-    fileCount: 26,
+    fileCount: 41,
     checksumFile: 'build-production-checksums.sha256',
     checksumAlgorithm: 'SHA256',
     checksumExclusions: ['**/*.map', 'manual-check.png'],
@@ -248,6 +248,22 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
     assert.equal(capture.captured, true);
     assert.equal(capture.mimeType, 'image/png');
     assert.ok(capture.data.length > 0);
+    const canvasUuid = (await call(client, 'cocos_find_node', { pageUrl, path: '/InspectorTest/Canvas' })).matches[0].uuid as string;
+    await page.setViewportSize({ width: 1024, height: 1024 });
+    const fullCapture = await call(client, 'cocos_capture_node', { pageUrl, uuid: canvasUuid });
+    assert.equal(fullCapture.captured, true, JSON.stringify({ ...fullCapture, data: undefined }));
+    const display = async (path: string, componentType: string) => {
+      const uuid = (await call(client, 'cocos_find_node', { pageUrl, path })).matches[0].uuid as string;
+      return { uuid, properties: (await call(client, 'cocos_get_properties', { pageUrl, uuid, componentType, maxDepth: 0 })).properties };
+    };
+    assert.equal((await display('/InspectorTest/Canvas/Panel/TitleLabel', 'Label')).properties.string, 'Inspector title');
+    assert.equal((await display('/InspectorTest/Canvas/Panel/TestButton', 'Button')).properties.interactable, true);
+    assert.equal((await display('/InspectorTest/Canvas/Panel/IconSprite', 'Sprite')).properties.spriteFrame.name, 'default_sprite_splash');
+    assert.equal((await display('/InspectorTest/Canvas/Panel/TestRichText', 'RichText')).properties.string, '<b>Rich</b> fixture');
+    const toggle = await display('/InspectorTest/Canvas/Panel/TestToggle', 'Toggle');
+    assert.equal(toggle.properties.isChecked, true);
+    assert.equal((await call(client, 'cocos_click_node', { pageUrl, uuid: toggle.uuid })).clicked, true);
+    assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: toggle.uuid, componentType: 'Toggle', key: 'isChecked', equals: false, timeoutMs: 2_000 })).matched, true);
     assert.equal(context.parent.name, 'Canvas');
     const filtered = await call(client, 'cocos_find_node', { pageUrl, nameContains: 'Pan', componentType: 'InspectorFixture', active: true, pathPrefix: '/InspectorTest' });
     assert.equal(filtered.matches[0].uuid, panelUuid);
@@ -264,6 +280,9 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
     assert.equal(properties.properties.count, 7);
     assert.equal(properties.properties.featureEnabled, true);
     assert.equal(properties.properties.details.category, 'manual-test');
+    const waited = await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', equals: 7, timeoutMs: 1_000 });
+    assert.deepEqual(waited, { matched: true, key: 'count', value: 7, polls: 1 });
+    assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', equals: 8, timeoutMs: 300 })).matched, false);
     assert.equal((await call(client, 'cocos_pause', { pageUrl })).after.paused, true);
     assert.equal((await call(client, 'cocos_resume', { pageUrl })).after.paused, false);
     assert.equal(JSON.stringify(properties).includes('must-not-be-returned'), false);
@@ -290,6 +309,8 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
       code: 'MULTIPLE_PAGES',
       message: `Multiple localhost pages found; pass pageUrl: ${pageUrl}, ${pageUrl}`,
     });
+    const missingNode = await client.callTool({ name: 'cocos_get_node', arguments: { pageUrl, uuid: 'does-not-exist' } });
+    assert.deepEqual(missingNode.structuredContent, { code: 'NODE_NOT_FOUND', message: 'Node not found' });
     const missing = await client.callTool({ name: 'cocos_runtime_info', arguments: { pageUrl: `http://127.0.0.1:${fixturePort}/missing` } });
     assert.equal(missing.isError, true);
     assert.deepEqual(missing.structuredContent, { code: 'PAGE_NOT_FOUND', message: `Local page not found: http://127.0.0.1:${fixturePort}/missing` });

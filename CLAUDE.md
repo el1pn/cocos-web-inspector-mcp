@@ -32,7 +32,7 @@ Tests compile into `dist/test/`; `npm test` always builds first. Install the mat
 The process is a stdio MCP server with one path from tool input to browser inspection:
 
 1. `src/index.ts` resolves the CDP endpoint from `--cdp-endpoint`, then `COCOS_CDP_ENDPOINT`, then the loopback default. It owns transport startup and graceful shutdown.
-2. `src/server.ts` defines the five strict Zod tool schemas and converts each call into a `BridgeRequest`. Keep MCP validation and tool metadata here.
+2. `src/server.ts` defines the strict Zod tool schemas and converts each call into a `BridgeRequest`. Keep MCP validation and tool metadata here.
 3. `src/browser.ts` validates loopback-only CDP/page URLs, maintains a reusable Playwright CDP connection, and selects exactly one eligible page. Keep browser connection and target-selection policy here.
 4. `src/bridge.ts` runs `inspectCocos` through `page.evaluate`. It discovers the Cocos 3.x runtime, traverses the active scene, serializes bounded public data, and implements the temporary highlight overlay.
 
@@ -54,20 +54,21 @@ This server intentionally has a narrow, read-only inspection surface. Preserve t
 
 `test/self-test.ts` uses Node's built-in test runner and a fake Cocos object graph. It covers URL policy, traversal, serialization/redaction, Cocos version rejection, and the MCP tool surface through an in-memory transport.
 
-`test/integration-test.ts` serves the vendored Cocos 3.8.8 build, launches Chromium with loopback CDP, and exercises page selection, all five tools, highlight bounds, and reconnect behavior. Do not silently skip this test when Chromium is missing.
+`test/integration-test.ts` serves the vendored Cocos 3.8.8 build, launches Chromium with loopback CDP, and exercises page selection, every tool including display fields and click, highlight bounds, and reconnect behavior. Do not silently skip this test when Chromium is missing.
 
 TypeScript uses `NodeNext`, strict mode, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes`. Source imports therefore use `.js` extensions, and optional fields may need explicit `| undefined` in shared request types.
 
 ## Cross-repository fixture collaboration
 
-The sibling `cocos-web-inspector-fixture` repository owns the Cocos project, source scene, custom component, and generated web-build handoff. This repository owns the vendored integration-test snapshot, browser harness, MCP assertions, scripts, and CI.
+The sibling `cocos-web-inspector-fixture` repository (`/Users/longpn/cocos-web-inspector-fixture`, GitHub `el1pn/cocos-web-inspector-fixture`) owns the Cocos project, source scene, custom component, and web builds. This repository owns the vendored integration-test snapshot, browser harness, MCP assertions, scripts, and CI.
 
-When work spans both repositories:
+When a live fixture peer session exists (`ListAgents`), coordinate through `SendMessage` and let that session change the fixture repository. Otherwise this session may change the fixture repository directly, committing there separately.
 
-1. Use `ListAgents` to find the live peer session by workspace name; do not persist a session ID.
-2. Use `SendMessage` for the fixture contract, status, changed-file list, build path, and manifest/checksum handoff.
-3. Modify only this repository. Never ask the peer to modify this repository, and never modify the fixture repository from this session.
-4. Treat sibling files as read-only until the fixture session explicitly hands off a generated build.
-5. If no fixture peer is available, stop at the handoff boundary instead of silently editing the sibling repository.
+Fixture build workflow (details in the fixture README):
 
-Vendored Cocos builds are generated artifacts. Do not hand-edit them. Keep their provenance and checksum manifest beside the snapshot, and update them only from a fixture-session handoff.
+1. Regenerate the scene with `python3 tools/gen-scene.py tools/samples.json` when the canary contract changes.
+2. On an empty `library/`, open the project once in the Creator 3.8.8 GUI to import, then close it. The headless CLI often starts without the `scene`/`typescript` importers and rewrites their `.meta` files to `"importer": "*"`.
+3. CLI-build `build-dev.json` and `build-production.json`; confirm each `src/settings.json` has non-empty `engine.builtinAssets` and `scripting.scriptPackages`.
+4. Verify the canaries live in Chrome through this MCP server before vendoring.
+
+Vendored Cocos builds are generated artifacts. Do not hand-edit them. Copy them from the fixture build output, regenerate the SHA-256 manifest beside each snapshot, and record the fixture source commit in its provenance.

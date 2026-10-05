@@ -4,6 +4,27 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.6
+
+### Added
+
+- `cocos_get_properties` returns allowlisted display fields read without getters: `Label.string`, `RichText.string`, `Button.interactable`, `Toggle.isChecked`, and `Sprite.spriteFrame` name/UUID.
+- `cocos_wait_for_property` polls one top-level property until it equals a primitive value or times out.
+- `cocos_click_node` dispatches a real mouse click at a visible UI node's center; registered only with `--allow-runtime-mutation`.
+- `cocos_capture_node` falls back to JPEG when the PNG exceeds the response limit.
+- CDP connection retries `[::1]` when `127.0.0.1` refuses or returns 404, and hints at Chrome's built-in remote debugging toggle on 404.
+
+### Fixed
+
+- In-page errors now map to their stable codes (`NODE_NOT_FOUND`, `INVALID_MUTATION`, ...) instead of `CDP_UNAVAILABLE`.
+- `maxDepth: 0` returns top-level primitives instead of `"[MaxDepth]"`.
+- Node bounds project through the Canvas camera, so highlight, capture, and click stay aligned after the viewport aspect ratio changes.
+- Duplicate-URL `MULTIPLE_PAGES` errors explain how to separate projects.
+
+### Changed
+
+- Vendored Cocos 3.8.8 fixtures rebuilt from the recreated fixture project with Sprite, Toggle, and RichText canaries.
+
 ## 0.1.5
 
 ### Fixed

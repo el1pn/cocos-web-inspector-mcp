@@ -1,4 +1,4 @@
-System.register(['./_virtual_cc-y8x7t64p.js'], (function (exports) {
+System.register(['./_virtual_cc-BXL2MJcZ.js'], (function (exports) {
   'use strict';
   var _createForOfIteratorHelperLoose;
   return {
@@ -1237,4 +1237,3 @@ System.register(['./_virtual_cc-y8x7t64p.js'], (function (exports) {
     })
   };
 }));
-//# sourceMappingURL=spine.wasm-D0eJsqNg.js.map

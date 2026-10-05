@@ -38,10 +38,24 @@ export async function captureNode(page: Page, uuid: string): Promise<unknown> {
   if (!result.available || !result.visible) return { captured: false, reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
   const clip = result.clippedViewport;
   if (!clip || !Number.isFinite(clip.x) || !Number.isFinite(clip.y) || !Number.isFinite(clip.width) || !Number.isFinite(clip.height) || clip.width <= 0 || clip.height <= 0 || clip.width > 1_024 || clip.height > 1_024 || clip.width * clip.height > 1_048_576) return { captured: false, reason: 'CAPTURE_LIMIT' };
-  const png = await page.screenshot({ type: 'png', clip });
-  const data = png.toString('base64');
-  if (Buffer.byteLength(JSON.stringify({ data }), 'utf8') > MAX_BYTES - 4_096) return { captured: false, reason: 'RESPONSE_LIMIT' };
-  return { captured: true, mimeType: 'image/png', data, width: Math.round(clip.width), height: Math.round(clip.height) };
+  // ponytail: device-pixel PNG, then CSS-pixel JPEG quality steps; add CDP clip.scale downscaling if captures still hit the limit.
+  const attempts: Array<{ type: 'png' | 'jpeg'; quality?: number; scale: 'device' | 'css' }> = [{ type: 'png', scale: 'device' }, ...[80, 60, 40].map(quality => ({ type: 'jpeg' as const, quality, scale: 'css' as const }))];
+  for (const options of attempts) {
+    const data = (await page.screenshot({ ...options, clip })).toString('base64');
+    if (Buffer.byteLength(JSON.stringify({ data }), 'utf8') <= MAX_BYTES - 4_096) {
+      return { captured: true, mimeType: `image/${options.type}`, data, width: Math.round(clip.width), height: Math.round(clip.height) };
+    }
+  }
+  return { captured: false, reason: 'RESPONSE_LIMIT' };
+}
+
+export async function clickNode(page: Page, uuid: string): Promise<unknown> {
+  const result = await page.evaluate(inspectCocos, { action: 'getNodeBounds', uuid } satisfies BridgeRequest) as any;
+  if (!result.available || !result.visible) return { clicked: false, reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
+  const clip = result.clippedViewport;
+  const point = { x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 };
+  await page.mouse.click(point.x, point.y);
+  return { clicked: true, target: { nodeUuid: uuid }, point, runtimeOnly: true };
 }
 
 export function inspectCocosPage(): unknown {
@@ -176,8 +190,24 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const worldY = Math.min(...points.map(point => Number(point.y)));
     const worldWidth = Math.max(...points.map(point => Number(point.x))) - worldX;
     const worldHeight = Math.max(...points.map(point => Number(point.y))) - worldY;
+    // Project through the owning Canvas camera; the visible-area mapping is wrong once the camera no longer centers on it.
+    let camera: any;
+    for (let current = node, depth = 0; current && !camera && depth < 100; current = current.parent, depth++) {
+      camera = components(current).find(component => componentName(component) === 'Canvas')?.cameraComponent;
+    }
+    const screen = typeof camera?.worldToScreen === 'function' && cc.Vec3 && canvas.width > 0 && canvas.height > 0
+      ? points.map(point => camera.worldToScreen(new cc.Vec3(Number(point.x), Number(point.y), 0), new cc.Vec3()))
+      : undefined;
     const origin = cc.view?.getVisibleOrigin?.() ?? { x: 0, y: 0 };
-    const viewport = { x: canvasRect.left + (worldX - Number(origin.x ?? 0)) * canvasRect.width / Number(visible.width), y: canvasRect.top + (Number(origin.y ?? 0) + Number(visible.height) - worldY - worldHeight) * canvasRect.height / Number(visible.height), width: worldWidth * canvasRect.width / Number(visible.width), height: worldHeight * canvasRect.height / Number(visible.height) };
+    const viewport = screen?.every(point => Number.isFinite(point.x) && Number.isFinite(point.y))
+      ? (() => {
+        const xs = screen.map(point => Number(point.x));
+        const ys = screen.map(point => Number(point.y));
+        const sx = canvasRect.width / canvas.width;
+        const sy = canvasRect.height / canvas.height;
+        return { x: canvasRect.left + Math.min(...xs) * sx, y: canvasRect.top + (canvas.height - Math.max(...ys)) * sy, width: (Math.max(...xs) - Math.min(...xs)) * sx, height: (Math.max(...ys) - Math.min(...ys)) * sy };
+      })()
+      : { x: canvasRect.left + (worldX - Number(origin.x ?? 0)) * canvasRect.width / Number(visible.width), y: canvasRect.top + (Number(origin.y ?? 0) + Number(visible.height) - worldY - worldHeight) * canvasRect.height / Number(visible.height), width: worldWidth * canvasRect.width / Number(visible.width), height: worldHeight * canvasRect.height / Number(visible.height) };
     if (!Object.values(viewport).every(Number.isFinite) || viewport.width <= 0 || viewport.height <= 0) return { available: false, reason: 'INVALID_GEOMETRY' };
     const clipped = { x: Math.max(0, viewport.x), y: Math.max(0, viewport.y), width: Math.max(0, Math.min(innerWidth, viewport.x + viewport.width) - Math.max(0, viewport.x)), height: Math.max(0, Math.min(innerHeight, viewport.y + viewport.height) - Math.max(0, viewport.y)) };
     return { available: true, canvas: { x: worldX, y: worldY, width: worldWidth, height: worldHeight }, viewport, clippedViewport: clipped, anchor: { x: Number(transform.anchorPoint.x), y: Number(transform.anchorPoint.y) }, worldPosition: { x: Number(position.x), y: Number(position.y), z: Number(position.z ?? 0) }, visible: clipped.width > 0 && clipped.height > 0, outsideViewport: clipped.width === 0 || clipped.height === 0 };
@@ -381,7 +411,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
         return { $type: 'Node', uuid: String(uuid), name: String(dataProperty(value, 'name') ?? '').slice(0, 500) };
       }
       if (reference && uuid && dataProperty(value, 'node')) return { $type: 'Component', uuid: String(uuid), type: componentName(value) };
-      if (depth >= maxDepth) {
+      if (depth > 0 && depth >= maxDepth) {
         truncate('MAX_DEPTH');
         return '[MaxDepth]';
       }
@@ -430,12 +460,35 @@ export function inspectCocos(request: BridgeRequest): unknown {
       seen.delete(value);
       return output;
     };
+    // ponytail: fixed allowlist of display backing fields, read without getters; extend per component when smoke tests need more.
+    const displayFields: Record<string, unknown> = {};
+    const readDisplay = (type: string, key: string, backing: string) => {
+      if (typeof cc[type] !== 'function' || !(selected instanceof cc[type])) return;
+      const value = dataProperty(selected, backing);
+      if (typeof value === 'string') {
+        if (value.length > 2_000) truncate('STRING_LIMIT');
+        displayFields[key] = value.slice(0, 2_000);
+      } else if (value === null || typeof value === 'boolean' || typeof value === 'number') displayFields[key] = value;
+    };
+    readDisplay('Label', 'string', '_string');
+    readDisplay('RichText', 'string', '_string');
+    readDisplay('Button', 'interactable', '_interactable');
+    readDisplay('Toggle', 'isChecked', '_isChecked');
+    if (typeof cc.Sprite === 'function' && selected instanceof cc.Sprite) {
+      const frame = dataProperty(selected, '_spriteFrame');
+      displayFields.spriteFrame = frame && typeof frame === 'object'
+        ? { $type: 'SpriteFrame', name: String(dataProperty(frame, '_name') ?? '').slice(0, 500), uuid: String(dataProperty(frame, '_uuid') ?? '') }
+        : null;
+    }
+    const properties = serialize(selected, 0, false);
+    Object.assign(properties, displayFields);
+    returned += Object.keys(displayFields).length;
     return {
       version,
       node: summary(node),
       componentType: request.componentType ?? (selected === node ? undefined : componentName(selected)),
       componentUuid: selected === node ? undefined : String(selected.uuid ?? ''),
-      properties: serialize(selected, 0, false),
+      properties,
       truncated,
       truncationReasons: [...truncationReasons],
       propertyCount,

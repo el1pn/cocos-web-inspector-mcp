@@ -47696,6 +47696,7 @@ System.register([], (function (exports, module) {
           this._callback = null;
           this._rAF = undefined;
           this._cAF = undefined;
+          this._useSetTimeoutMode = false;
           this._handleRAF = function (stamp) {
             var currTime = performance.now();
             var elapseTime = currTime - _this._startTime;
@@ -47721,7 +47722,7 @@ System.register([], (function (exports, module) {
         _proto.start = function start() {
           var _this2 = this;
           if (this._isPlaying) return;
-          var recordStartTime = this._rAF === undefined || USE_XR;
+          var recordStartTime = this._rAF === undefined || this._useSetTimeoutMode || USE_XR;
           var updateCallback = function updateCallback() {
             if (recordStartTime) _this2._startTime = performance.now();
             if (_this2._isPlaying) {
@@ -47744,7 +47745,7 @@ System.register([], (function (exports, module) {
           this._frameCount = 0;
         };
         _proto._stTime = function _stTime(callback) {
-          if (this._rAF === undefined || USE_XR) {
+          if (this._rAF === undefined || this._useSetTimeoutMode || USE_XR) {
             var currTime = performance.now();
             var elapseTime = Math.max(0, currTime - this._startTime);
             var timeToCall = Math.max(0, this._frameTime - elapseTime);
@@ -47754,7 +47755,7 @@ System.register([], (function (exports, module) {
           return this._rAF.call(window, this._handleRAF);
         };
         _proto._ctTime = function _ctTime(id) {
-          if (this._cAF === undefined || USE_XR) {
+          if (this._cAF === undefined || this._useSetTimeoutMode || USE_XR) {
             clearTimeout(id);
           } else if (id) {
             this._cAF.call(window, id);
@@ -47783,6 +47784,22 @@ System.register([], (function (exports, module) {
           },
           set: function set(val) {
             this._onTick = val;
+          }
+        }, {
+          key: "useSetTimeoutMode",
+          get: function get() {
+            return this._useSetTimeoutMode;
+          },
+          set: function set(val) {
+            if (this._useSetTimeoutMode === val) return;
+            var wasPlaying = this._isPlaying;
+            if (wasPlaying) {
+              this.stop();
+            }
+            this._useSetTimeoutMode = val;
+            if (wasPlaying) {
+              this.start();
+            }
           }
         }]);
         return Pacer;
@@ -49830,6 +49847,7 @@ System.register([], (function (exports, module) {
           _this._rendererInitialized = false;
           _this._paused = true;
           _this._pausedByEngine = false;
+          _this.persistRunInBackground = false;
           _this._frameRate = 60;
           _this._pacer = null;
           _this._initTime = 0;
@@ -50228,11 +50246,19 @@ System.register([], (function (exports, module) {
         };
         _proto._onHide = function _onHide() {
           this.emit(Game.EVENT_HIDE);
-          this.pauseByEngine();
+          if (this.persistRunInBackground) {
+            if (this._pacer) this._pacer.useSetTimeoutMode = true;
+          } else {
+            this.pauseByEngine();
+          }
         };
         _proto._onShow = function _onShow() {
           this.emit(Game.EVENT_SHOW);
-          this.resumeByEngine();
+          if (this.persistRunInBackground) {
+            if (this._pacer) this._pacer.useSetTimeoutMode = false;
+          } else {
+            this.resumeByEngine();
+          }
         };
         _proto._onClose = function _onClose() {
           this.emit(Game.EVENT_CLOSE);
@@ -108496,7 +108522,7 @@ System.register([], (function (exports, module) {
         };
         return ensureWasmModuleReady().then(function () {
           if (shouldUseWasmModule()) {
-            return Promise.all([module.import('./spine.wasm-D0eJsqNg.js'), module.import('./spine-DfhiCve8.js')]).then(function (_ref) {
+            return Promise.all([module.import('./spine.wasm-DUdk2CmB.js'), module.import('./spine-DfhiCve8.js')]).then(function (_ref) {
               var wasmFactory = _ref[0]["default"],
                 spineWasmUrl = _ref[1]["default"];
               return initWasm(wasmFactory, spineWasmUrl);
@@ -124449,4 +124475,3 @@ System.register([], (function (exports, module) {
     })
   };
 }));
-//# sourceMappingURL=_virtual_cc-y8x7t64p.js.map

@@ -8,4 +8,3 @@ System.register([], (function (exports, module) {
 		})
 	};
 }));
-//# sourceMappingURL=spine-DfhiCve8.js.map

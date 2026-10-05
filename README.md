@@ -108,6 +108,7 @@ All tool input objects are strict. Unknown fields are rejected. Inspection tools
 | `cocos_set_node_active` | Set one node's active state. Registered only with `--allow-runtime-mutation`; returns before/after state. | `pageUrl?`; `uuid`; `active` boolean |
 | `cocos_set_transform` | Update supplied position, rotation, and/or scale fields for one node. | `pageUrl?`; `uuid`; `position?`, `rotation?`, `scale?` finite vectors |
 | `cocos_set_property` | Update one bounded public component data property. | `pageUrl?`; node `uuid`; `componentUuid`; `key`; primitive/vector/size/color `value` matching current shape |
+| `cocos_click_node` | Dispatch a real mouse click at the visible center of one UI node so Button/touch handlers run. Registered only with `--allow-runtime-mutation`. | `pageUrl?`; `uuid` |
 | `cocos_pause` | Pause the Cocos director when its public API supports it. | `pageUrl?` |
 | `cocos_resume` | Resume the Cocos director when its public API supports it. | `pageUrl?` |
 | `cocos_scene_tree` | Return a bounded scene tree with node and component summaries. | `pageUrl?`; `maxDepth?` integer `0..20`, default `6`; `maxNodes?` integer `1..5000`, default `500` |
@@ -116,11 +117,12 @@ All tool input objects are strict. Unknown fields are rejected. Inspection tools
 | `cocos_get_node` | Return one node's path, parent, bounded direct children, and components. | `pageUrl?`; `uuid` |
 | `cocos_snapshot_subtree` | Return a bounded stateless hierarchy snapshot; clients compare snapshots. | `pageUrl?`; `uuid`; `maxDepth?`; `maxNodes?` |
 | `cocos_get_node_bounds` | Return bounded canvas/viewport bounds, anchor, world position, and visibility for one UI node. | `pageUrl?`; `uuid` |
-| `cocos_capture_node` | Return an in-memory viewport-clipped PNG for one visible UI node; no file is written. | `pageUrl?`; `uuid` |
-| `cocos_get_properties` | Serialize public properties for a node or one component selected by type or UUID. | `pageUrl?`; `uuid`; `componentType?` or `componentUuid?`; `maxDepth?` integer `0..6`, default `3` |
+| `cocos_capture_node` | Return an in-memory viewport-clipped image for one visible UI node: PNG, falling back to JPEG when PNG exceeds the response limit; no file is written. | `pageUrl?`; `uuid` |
+| `cocos_get_properties` | Serialize public properties for a node or one component selected by type or UUID. | `pageUrl?`; `uuid`; `componentType?` or `componentUuid?`; `maxDepth?` integer `0..6`, default `3`; `0` returns top-level primitives |
+| `cocos_wait_for_property` | Poll one top-level property until it strictly equals a primitive value or the timeout passes. | `pageUrl?`; `uuid`; `componentType?` or `componentUuid?`; `key`; `equals`; `timeoutMs?` `100..30000`, default `5000`; `intervalMs?` `50..5000`, default `200` |
 | `cocos_highlight_node` | Draw a temporary pointer-transparent overlay around a UI node. | `pageUrl?`; `uuid`; `durationMs?` integer `100..10000`, default `2000` |
 
-`cocos_runtime_diagnostics` does not enable profiler/statistics systems. FPS, frame time, draw calls, triangles, and generic invalid-reference checks return `UNSUPPORTED_PUBLIC_API` until stable passive public Cocos APIs are verified. `cocos_highlight_node` temporarily mutates the page DOM only. It does not mutate the Cocos node/component graph or game state. `cocos_capture_node` clips only to the visible browser viewport, never falls back to full-page capture, limits captures to 1,024 × 1,024 CSS pixels / 1,048,576 total pixels, returns PNG base64 in-memory, and rejects oversized responses. Mutation results provide `before` values for manual inverse calls, but restoration cannot undo lifecycle callbacks or other runtime side effects. Frame stepping is unsupported pending a verified public Cocos API compatibility matrix.
+`cocos_runtime_diagnostics` does not enable profiler/statistics systems. FPS, frame time, draw calls, triangles, and generic invalid-reference checks return `UNSUPPORTED_PUBLIC_API` until stable passive public Cocos APIs are verified. `cocos_highlight_node` temporarily mutates the page DOM only. It does not mutate the Cocos node/component graph or game state. `cocos_capture_node` clips only to the visible browser viewport, never falls back to full-page capture, limits captures to 1,024 × 1,024 CSS pixels / 1,048,576 total pixels, returns PNG (or JPEG fallback) base64 in-memory, and rejects responses still oversized after JPEG quality steps. Mutation results provide `before` values for manual inverse calls, but restoration cannot undo lifecycle callbacks or other runtime side effects. Frame stepping is unsupported pending a verified public Cocos API compatibility matrix.
 
 ### Page selection
 
@@ -129,6 +131,14 @@ Eligible game pages must use HTTP or HTTPS on a loopback host.
 - With one eligible page, `pageUrl` may be omitted.
 - With multiple eligible pages, `pageUrl` is required.
 - `pageUrl` must exactly match the full URL reported by the browser, including path, query, and fragment.
+- Tabs with identical URLs cannot be told apart; close duplicates before inspecting.
+
+Every MCP client pointed at the same CDP endpoint sees every loopback tab in that browser. When several projects run at once, give each project its own Chromium, port, and profile, then configure the server at project scope:
+
+```sh
+chrome --remote-debugging-address=127.0.0.1 --remote-debugging-port=9223 --user-data-dir="$HOME/.cocos-mcp/project-a"
+claude mcp add cocos-web-inspector npx -- -y cocos-web-inspector-mcp@latest --cdp-endpoint http://127.0.0.1:9223
+```
 
 Tool validation, connection, selection, and inspection failures are returned as MCP tool errors. Operational errors include JSON `structuredContent` and text content with stable `code` and `message` fields. Current codes include `CDP_UNAVAILABLE`, `NO_LOCAL_PAGE`, `MULTIPLE_PAGES`, `PAGE_NOT_FOUND`, `COCOS_NOT_FOUND`, `SCENE_NOT_READY`, `NODE_NOT_FOUND`, and `COMPONENT_NOT_FOUND`.
 
@@ -169,6 +179,8 @@ Inspection still executes fixed bridge code inside the attached page. Treat all 
 
 Property serialization skips accessors, private-prefixed keys, functions, symbols, cycles, and secret-like key names such as tokens, cookies, passwords, credentials, authorization data, and storage.
 
+An allowlist of display fields is read directly from their backing data fields, still without invoking getters: `Label.string`, `RichText.string`, `Button.interactable`, `Toggle.isChecked`, and `Sprite.spriteFrame` (name and UUID only).
+
 These controls reduce accidental disclosure; they do not make CDP a complete security boundary. Always:
 
 - Use a disposable browser profile.
@@ -190,8 +202,8 @@ The test suite covers URL policy, CDP connection reuse and recovery, scene trave
 
 ## Troubleshooting
 
-- `CDP_UNAVAILABLE`: start Chromium with loopback remote debugging; rerun `npm run install:chromium` for development tests.
-- `MULTIPLE_PAGES`: call `cocos_list_pages`, then pass the exact reported `pageUrl`.
+- `CDP_UNAVAILABLE`: start Chromium with loopback remote debugging; rerun `npm run install:chromium` for development tests. A `404` usually means Chrome's built-in remote debugging toggle (`chrome://inspect/#remote-debugging`) holds the port; turn it off or use another port, and check listeners with `lsof -nP -iTCP:9222 -sTCP:LISTEN`. When `127.0.0.1` returns 404 or refuses the connection, the server retries `[::1]` on the same port.
+- `MULTIPLE_PAGES`: call `cocos_list_pages`, then pass the exact reported `pageUrl`. If tabs share one URL, close duplicates or use a separate Chromium per project (see Page selection).
 - `COCOS_NOT_FOUND` or `SCENE_NOT_READY`: wait for the web build to finish loading; use `cocos_runtime_info` after the active scene exists.
 - Runtime mutation tools missing: restart the server with `--allow-runtime-mutation`; a tool call cannot enable this mode.
 - Bounds/capture unavailable: select a visible UI node with `UITransform`. Capture is viewport-only, bounded, and never falls back to a full-page screenshot.

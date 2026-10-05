@@ -8,4 +8,3 @@ System.register([], (function (exports, module) {
 		})
 	};
 }));
-//# sourceMappingURL=spine.js-Daiw-Blo.js.map

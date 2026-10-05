@@ -7,7 +7,7 @@
     "debug": false,
     "sourceMaps": false,
     "entryScene": "db://assets/scenes/InspectorTest.scene",
-    "fileCount": 26,
+    "fileCount": 41,
     "checksumFile": "build-production-checksums.sha256",
     "checksumAlgorithm": "SHA256",
     "checksumExclusions": [
@@ -16,20 +16,23 @@
     ]
   },
   "provenance": {
-    "sourceCommit": "ca4463a1da564578c07e61cbd75b1bb62404ffee",
-    "dirtyStateAtBuild": "untracked build-production.json",
+    "sourceCommit": "58fec3ca0daaafa35f2470fb4785319ee0535cbc",
+    "dirtyStateAtBuild": "clean",
     "buildConfig": "build-production.json",
-    "buildCommand": "env -u ELECTRON_RUN_AS_NODE C:/ProgramData/cocos/editors/Creator/3.8.8/CocosCreator.exe --project <project> --build configPath=<windows-config-path>;platform=web-mobile"
+    "buildCommand": "env -u ELECTRON_RUN_AS_NODE /Applications/Cocos/Creator/3.8.8/CocosCreator.app/Contents/MacOS/CocosCreator --project <project> --build configPath=<project>/build-production.json"
   },
   "verification": {
     "result": "PASS",
     "runtime": {
-      "url": "http://127.0.0.1:8766/",
+      "url": "http://127.0.0.1:8798/",
       "scene": "InspectorTest",
       "scenePaths": [
         "/InspectorTest/Canvas/Panel",
         "/InspectorTest/Canvas/Panel/TitleLabel",
         "/InspectorTest/Canvas/Panel/TestButton",
+        "/InspectorTest/Canvas/Panel/IconSprite",
+        "/InspectorTest/Canvas/Panel/TestToggle",
+        "/InspectorTest/Canvas/Panel/TestRichText",
         "/InspectorTest/Canvas/UICamera"
       ],
       "components": {
@@ -43,7 +46,21 @@
         ],
         "/InspectorTest/Canvas/Panel/TestButton": [
           "UITransform",
+          "Sprite",
           "Button"
+        ],
+        "/InspectorTest/Canvas/Panel/IconSprite": [
+          "UITransform",
+          "Sprite"
+        ],
+        "/InspectorTest/Canvas/Panel/TestToggle": [
+          "UITransform",
+          "Sprite",
+          "Toggle"
+        ],
+        "/InspectorTest/Canvas/Panel/TestRichText": [
+          "UITransform",
+          "RichText"
         ],
         "/InspectorTest/Canvas/UICamera": [
           "UITransform",
@@ -56,7 +73,12 @@
         "featureEnabled": true,
         "detailsCategory": "manual-test",
         "passwordRedacted": true,
-        "mustNotRunInvoked": false
+        "mustNotRunInvoked": false,
+        "labelString": "Inspector title",
+        "buttonInteractable": true,
+        "spriteFrameName": "default_sprite_splash",
+        "toggleChecked": true,
+        "richTextString": "<b>Rich</b> fixture"
       }
     }
   }

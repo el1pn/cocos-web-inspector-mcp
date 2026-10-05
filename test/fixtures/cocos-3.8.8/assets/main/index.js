@@ -16,6 +16,8 @@ System.register("chunks:///_virtual/InspectorFixture.ts", ['./rollupPluginModLoB
       cclegacy._RF.push({}, "9d1b9t1w0VEVITzZEiXhZfD", "InspectorFixture", undefined);
       var ccclass = _decorator.ccclass,
         property = _decorator.property;
+
+      // Canary component for cocos-web-inspector-mcp. Keep values in sync with fixture-manifest.json.
       var InspectorFixture = exports('InspectorFixture', (_dec = ccclass('InspectorFixture'), _dec(_class = (_class2 = /*#__PURE__*/function (_Component) {
         _inheritsLoose(InspectorFixture, _Component);
         function InspectorFixture() {
@@ -95,4 +97,3 @@ System.register("chunks:///_virtual/main", ['./InspectorFixture.ts'], function (
     };
     });
 });
-//# sourceMappingURL=index.js.map

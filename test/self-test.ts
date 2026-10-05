@@ -266,6 +266,47 @@ test('property serializer reports string and depth truncation', () => withFakeCo
   assert.equal(result.truncated, true);
 }));
 
+test('property serializer returns top-level primitives at maxDepth 0', () => withFakeCocos(() => {
+  const node = ((globalThis as any).cc.director.getScene()).children[0];
+  node.nested = { value: 1 };
+  const result = inspectCocos({ action: 'getProperties', uuid: 'child-1', maxDepth: 0 }) as any;
+  assert.equal(result.properties.publicValue, 7);
+  assert.equal(result.properties.nested, '[MaxDepth]');
+}));
+
+test('property serializer exposes allowlisted display fields without getters', () => withFakeCocos(() => {
+  const cc = (globalThis as any).cc;
+  class Label { uuid = 'component-label'; node = {}; _string = 'Balance: 100'; _secretToken = 'hidden'; }
+  Object.defineProperty(Label.prototype, 'string', { get: () => { throw new Error('getter ran'); } });
+  class Button { uuid = 'component-button'; node = {}; _interactable = false; }
+  class Sprite { uuid = 'component-sprite'; node = {}; _spriteFrame = { _name: 'coin', _uuid: 'frame-1', _texture: {} }; }
+  Object.assign(cc, { Label, Button, Sprite });
+  const node = cc.director.getScene().children[0];
+  node.components.push(new Label(), new Button(), new Sprite());
+  const read = (componentUuid: string) => (inspectCocos({ action: 'getProperties', uuid: 'child-1', componentUuid, maxDepth: 1 }) as any).properties;
+  assert.equal(read('component-label').string, 'Balance: 100');
+  assert.equal(JSON.stringify(read('component-label')).includes('hidden'), false);
+  assert.equal(read('component-button').interactable, false);
+  assert.deepEqual(read('component-sprite').spriteFrame, { $type: 'SpriteFrame', name: 'coin', uuid: 'frame-1' });
+  assert.equal(read('component-stats').string, undefined);
+}));
+
+test('browser connection retries IPv6 loopback and hints at port collisions', async () => {
+  const ipv6 = fakeBrowser();
+  const tried: string[] = [];
+  const connection = new BrowserConnection('http://127.0.0.1:9222', 10_000, async endpoint => {
+    tried.push(endpoint);
+    if (endpoint.includes('[::1]')) return ipv6.browser;
+    throw new Error('Unexpected status 404');
+  });
+  assert.equal(await connection.page(), ipv6.page);
+  assert.deepEqual(tried, ['http://127.0.0.1:9222', 'http://[::1]:9222']);
+  await connection.close();
+  const failing = new BrowserConnection('http://127.0.0.1:9222', 10_000, async () => { throw new Error('Unexpected status 404'); });
+  await assert.rejects(() => failing.page(), /chrome:\/\/inspect/);
+  await failing.close();
+});
+
 test('runBridge bounds oversized encoded responses', async () => {
   const page = { evaluate: async () => ({ payload: '\\'.repeat(100_000) }) } as any;
   assert.deepEqual(await runBridge(page, { action: 'sceneTree' }), {
@@ -301,6 +342,7 @@ test('MCP omits runtime mutation tools by default', async () => {
       'cocos_runtime_info',
       'cocos_scene_tree',
       'cocos_snapshot_subtree',
+      'cocos_wait_for_property',
     ]);
     const highlight = tools.tools.find(tool => tool.name === 'cocos_highlight_node');
     assert.deepEqual(highlight?.annotations, {
@@ -333,6 +375,7 @@ test('MCP exposes opted-in node active mutation with strict input', async () => 
         openWorldHint: false,
       });
     }
+    assert.equal(tools.tools.find(tool => tool.name === 'cocos_click_node')?.annotations?.idempotentHint, false);
     const invalid = await client.callTool({ name: 'cocos_set_node_active', arguments: { uuid: 'x', active: true, extra: true } });
     assert.equal(invalid.isError, true);
   } finally {

@@ -18,11 +18,25 @@
       ],
       "Canvas/Panel/TestButton": [
         "cc.UITransform",
+        "cc.Sprite",
         "cc.Button"
       ],
       "Canvas/UICamera": [
         "cc.UITransform",
         "cc.Camera"
+      ],
+      "Canvas/Panel/IconSprite": [
+        "cc.UITransform",
+        "cc.Sprite"
+      ],
+      "Canvas/Panel/TestToggle": [
+        "cc.UITransform",
+        "cc.Sprite",
+        "cc.Toggle"
+      ],
+      "Canvas/Panel/TestRichText": [
+        "cc.UITransform",
+        "cc.RichText"
       ]
     },
     "canaries": {
@@ -40,6 +54,13 @@
         "property": "Canvas/Panel.InspectorFixture.mustNotRun",
         "mustInvoke": false,
         "forbiddenError": "Property getter was invoked"
+      },
+      "displayValues": {
+        "Canvas/Panel/TitleLabel.Label.string": "Inspector title",
+        "Canvas/Panel/TestButton.Button.interactable": true,
+        "Canvas/Panel/IconSprite.Sprite.spriteFrame.name": "default_sprite_splash",
+        "Canvas/Panel/TestToggle.Toggle.isChecked": true,
+        "Canvas/Panel/TestRichText.RichText.string": "<b>Rich</b> fixture"
       }
     }
   },
@@ -47,10 +68,7 @@
     "platform": "web-mobile",
     "outputDirectory": "build/inspector-web",
     "steps": [
-      "Open this project in Cocos Creator 3.8.8.",
-      "Open assets/scenes/InspectorTest.scene.",
-      "In the Build panel, select Web Mobile and set the output directory to build/inspector-web.",
-      "Build the project from the Build panel."
+      "See README.md: import once in the GUI Editor, then CLI-build build-dev.json and build-production.json."
     ],
     "expectedFiles": [
       "index.html",

@@ -93,7 +93,7 @@ export class BrowserConnection {
       const wanted = validateLocalUrl(pageUrl, true).href;
       const selected = pages.filter(candidate => new URL(candidate.url()).href === wanted);
       if (selected.length === 0) throw new InspectorError('PAGE_NOT_FOUND', `Local page not found: ${sanitizeUrl(pageUrl)}`);
-      if (selected.length > 1) throw new InspectorError('MULTIPLE_PAGES', `Multiple localhost pages match pageUrl: ${sanitizeUrl(pageUrl)}`);
+      if (selected.length > 1) throw new InspectorError('MULTIPLE_PAGES', `Multiple localhost pages match pageUrl: ${sanitizeUrl(pageUrl)}; close duplicate tabs or use a separate Chromium per project`);
       return selected[0]!;
     }
     if (pages.length === 0) throw new InspectorError('NO_LOCAL_PAGE', 'No localhost page is attached to Chromium');
@@ -119,7 +119,14 @@ export class BrowserConnection {
     if (this.#browser?.isConnected()) return this.#browser;
     if (this.#connecting) return this.#connecting;
 
-    const connecting = this.connectOverCDP(this.endpoint, { timeout: this.timeout }).then(async browser => {
+    const options = { timeout: this.timeout };
+    const connecting = this.connectOverCDP(this.endpoint, options).catch(error => {
+      // A second Chromium on a taken IPv4 port may bind only [::1].
+      const url = new URL(this.endpoint);
+      if (!['127.0.0.1', 'localhost'].includes(url.hostname) || !/\b404\b|ECONNREFUSED/.test(String(error?.message))) throw error;
+      url.hostname = '[::1]';
+      return this.connectOverCDP(url.toString().replace(/\/$/, ''), options).catch(() => { throw error; });
+    }).then(async browser => {
       if (this.#closed) {
         await browser.close();
         throw new Error('Browser connection is closed');
@@ -131,7 +138,11 @@ export class BrowserConnection {
       return browser;
     }).catch(error => {
       if (error instanceof InspectorError || error instanceof Error && error.message === 'connect failed') throw error;
-      throw new InspectorError('CDP_UNAVAILABLE', `Unable to connect to Chromium CDP: ${error instanceof Error ? error.message : 'unknown error'}`);
+      const message = error instanceof Error ? error.message : 'unknown error';
+      const hint = /\b404\b/.test(message)
+        ? '; port is likely held by Chrome built-in remote debugging (chrome://inspect/#remote-debugging), which has no /json/version: turn it off or use another port, check with lsof -nP -iTCP:<port> -sTCP:LISTEN'
+        : '';
+      throw new InspectorError('CDP_UNAVAILABLE', `Unable to connect to Chromium CDP: ${message}${hint}`);
     });
     this.#connecting = connecting;
     try {

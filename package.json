@@ -1,6 +1,6 @@
 {
   "name": "cocos-web-inspector-mcp",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Read-only MCP inspector for Cocos Creator 3.x running in local Chromium",
   "license": "MIT",
   "repository": {
