@@ -7,7 +7,7 @@
 | 3.8.8 | Web Mobile debug | Verified | Live Chromium/CDP inspection, opt-in mutations, bounds, capture, snapshots, diagnostics |
 | 3.8.8 | Web Mobile production/minified | Verified | Checksum-validated live Chromium/CDP scene, component UUID, property, redaction, getter-safety, and active-state canaries |
 
-The debug fixture contract is [fixture-manifest.json](../test/fixtures/cocos-3.8.8/fixture-manifest.json). Production provenance and checksum are vendored at [fixture-production-provenance.json](../test/fixtures/cocos-3.8.8-production/fixture-production-provenance.json) and [build-production-checksums.sha256](../test/fixtures/cocos-3.8.8-production/build-production-checksums.sha256). Sibling-project handoff requires a checksum manifest and provenance metadata before vendored generated artifacts are updated.
+The debug fixture contract is [fixture-manifest.json](../test/fixtures/cocos-3.8.8/fixture-manifest.json). Production provenance and checksum are vendored at [fixture-production-provenance.json](../test/fixtures/cocos-3.8.8-production/fixture-production-provenance.json) and [build-production-checksums.sha256](../test/fixtures/cocos-3.8.8-production/build-production-checksums.sha256). The fixture project itself is not published; updating a vendored snapshot requires a checksum manifest and provenance metadata.
 
 ## Manually verified versions
 
@@ -19,7 +19,7 @@ These were verified live but are not vendored, so CI does not guard them. Each b
 | 3.7.4 | Web Mobile debug | 2026-10-05, MCP 0.1.7 | Same as 3.8.3 |
 | 3.6.3 | Web Mobile debug | 2026-10-05, MCP 0.1.7 | Same as 3.8.3 |
 
-To reproduce, copy the fixture project outside `/tmp`, set `creator.version`, and run the target Creator CLI with `--build "configPath=<project>/build-dev.json"`. A project under `/tmp` (a symlink to `/private/tmp` on macOS) makes Creator 3.8.3 record the custom script under both paths and drop it from the build with `Missing class`.
+To reproduce with the (unpublished) fixture project, copy it outside `/tmp`, set `creator.version`, and run the target Creator CLI with `--build "configPath=<project>/build-dev.json"`. A project under `/tmp` (a symlink to `/private/tmp` on macOS) makes Creator 3.8.3 record the custom script under both paths and drop it from the build with `Missing class`.
 
 ## Current limits
 

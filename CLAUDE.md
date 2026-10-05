@@ -58,13 +58,11 @@ This server intentionally has a narrow, read-only inspection surface. Preserve t
 
 TypeScript uses `NodeNext`, strict mode, `noUncheckedIndexedAccess`, and `exactOptionalPropertyTypes`. Source imports therefore use `.js` extensions, and optional fields may need explicit `| undefined` in shared request types.
 
-## Cross-repository fixture collaboration
+## Fixture builds
 
-The sibling `cocos-web-inspector-fixture` repository (`/Users/longpn/cocos-web-inspector-fixture`, GitHub `el1pn/cocos-web-inspector-fixture`) owns the Cocos project, source scene, custom component, and web builds. This repository owns the vendored integration-test snapshot, browser harness, MCP assertions, scripts, and CI.
+The Cocos fixture project (scene, `InspectorFixture` component, build configs) is not published. This repository owns the vendored integration-test snapshots, browser harness, MCP assertions, scripts, and CI; contributors test against those snapshots locally.
 
-When a live fixture peer session exists (`ListAgents`), coordinate through `SendMessage` and let that session change the fixture repository. Otherwise this session may change the fixture repository directly, committing there separately.
-
-Fixture build workflow (details in the fixture README):
+Fixture build workflow, for maintainers with the fixture project:
 
 1. Regenerate the scene with `python3 tools/gen-scene.py tools/samples.json` when the canary contract changes.
 2. On an empty `library/`, open the project once in the Creator 3.8.8 GUI to import, then close it. The headless CLI often starts without the `scene`/`typescript` importers and rewrites their `.meta` files to `"importer": "*"`.

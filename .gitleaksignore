@@ -1,0 +1,4 @@
+# Box2D build commit hash (b2_commit) inside vendored Cocos engine bundles, not a token.
+ba8f6b70e12d69d3991b4908766f5b34c0d2992f:test/fixtures/cocos-3.8.8-production/cocos-js/_virtual_cc-Bp5iGE8z.js:sourcegraph-access-token:1
+ebf709f544d52b2d746d8f147ef117fe6390e036:test/fixtures/cocos-3.8.8-production/cocos-js/_virtual_cc-Bt0m9tqJ.js:sourcegraph-access-token:1
+13d02d2056ff603744dda117f9a245763666a9c4:test/fixtures/cocos-3.8.8/cocos-js/_virtual_cc-y8x7t64p.js:sourcegraph-access-token:102352
