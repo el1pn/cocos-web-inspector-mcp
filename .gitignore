@@ -4,7 +4,5 @@ coverage/
 *.log
 .claude/
 
-# fixture/build.sh vendors other Creator versions for manual checks only
-/test/fixtures/cocos-*/
-!/test/fixtures/cocos-3.8.8/
-!/test/fixtures/cocos-3.8.8-production/
+# Creator 3.6.3 engine license forbids redistribution; build it locally only
+/test/fixtures/cocos-3.6.3/

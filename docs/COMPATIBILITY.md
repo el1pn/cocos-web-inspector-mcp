@@ -1,25 +1,25 @@
 # Compatibility
 
-## Verified fixture
+## Verified fixtures
 
-| Cocos Creator | Build target | Status | Coverage |
+CI runs the live Chromium/CDP integration test against each vendored snapshot.
+
+| Cocos Creator | Build target | Snapshot | Coverage |
 | --- | --- | --- | --- |
-| 3.8.8 | Web Mobile debug | Verified | Live Chromium/CDP inspection, opt-in mutations, bounds, capture, snapshots, diagnostics |
-| 3.8.8 | Web Mobile production/minified | Verified | Checksum-validated live Chromium/CDP scene, component UUID, property, redaction, getter-safety, and active-state canaries |
+| 3.8.8 | Web Mobile debug | [cocos-3.8.8](../test/fixtures/cocos-3.8.8/) | Live Chromium/CDP inspection, opt-in mutations, bounds, capture, snapshots, diagnostics |
+| 3.8.8 | Web Mobile production/minified | [cocos-3.8.8-production](../test/fixtures/cocos-3.8.8-production/) | Checksum-validated live Chromium/CDP scene, component UUID, property, redaction, getter-safety, and active-state canaries |
+| 3.8.3 | Web Mobile debug | [cocos-3.8.3](../test/fixtures/cocos-3.8.3/) | Same as 3.8.8 debug |
+| 3.7.4 | Web Mobile debug | [cocos-3.7.4](../test/fixtures/cocos-3.7.4/) | Same as 3.8.8 debug |
 
-The debug fixture contract is [fixture-manifest.json](../test/fixtures/cocos-3.8.8/fixture-manifest.json). Production provenance and checksum are vendored at [fixture-production-provenance.json](../test/fixtures/cocos-3.8.8-production/fixture-production-provenance.json) and [build-production-checksums.sha256](../test/fixtures/cocos-3.8.8-production/build-production-checksums.sha256). The fixture project lives in [fixture/](../fixture/); `fixture/build.sh` rebuilds a snapshot and its checksum manifest.
+The debug fixture contract is [fixture-manifest.json](../test/fixtures/cocos-3.8.8/fixture-manifest.json). Production provenance and checksum are vendored at [fixture-production-provenance.json](../test/fixtures/cocos-3.8.8-production/fixture-production-provenance.json) and [build-production-checksums.sha256](../test/fixtures/cocos-3.8.8-production/build-production-checksums.sha256). The fixture project lives in [fixture/](../fixture/); `fixture/build.sh <version>` rebuilds `test/fixtures/cocos-<version>` and its checksum manifest on macOS or Git Bash on Windows. The script avoids building under `/tmp`, a symlink to `/private/tmp` on macOS that makes Creator 3.8.3 drop custom scripts with `Missing class`.
 
 ## Manually verified versions
 
-These were verified live but are not vendored, so CI does not guard them. Each build came from the fixture project (source commit `58fec3ca0daaafa35f2470fb4785319ee0535cbc`, now `fixture/`) with only `package.json` `creator.version` changed, built headlessly as Web Mobile debug with `build-dev.json`.
-
 | Cocos Creator | Build target | Verified on | Coverage |
 | --- | --- | --- | --- |
-| 3.8.3 | Web Mobile debug | 2026-10-05, MCP 0.1.7 | Every inspector and runtime debugger tool, including display fields, click, wait, inactive bounds, redaction, and getter safety |
-| 3.7.4 | Web Mobile debug | 2026-10-05, MCP 0.1.7 | Same as 3.8.3 |
-| 3.6.3 | Web Mobile debug | 2026-10-05, MCP 0.1.7 | Same as 3.8.3 |
+| 3.6.3 | Web Mobile debug | 2026-10-06, fixture commit `9ea51ff` | Same as 3.8.8 debug |
 
-To reproduce, run `fixture/build.sh <version>`; it vendors `test/fixtures/cocos-<version>` for a manual check (git-ignored). The script avoids building under `/tmp`, a symlink to `/private/tmp` on macOS that makes Creator 3.8.3 drop custom scripts with `Missing class`.
+The 3.6.3 engine ships under a proprietary license (`licenses/ENGINE_license.txt`) that forbids redistribution, so its build is not vendored and CI does not guard it. To recheck, run `fixture/build.sh 3.6.3`, add `'3.6.3'` to `creatorVersions` in `test/integration-test.ts`, run `npm run test:integration`, and delete the snapshot afterward.
 
 ## Current limits
 

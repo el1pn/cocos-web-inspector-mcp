@@ -9,4 +9,4 @@
 *.bin binary
 *.mem binary
 
-test/fixtures/cocos-3.8.8-production/** -text -eol
+test/fixtures/cocos-*/** -text -eol

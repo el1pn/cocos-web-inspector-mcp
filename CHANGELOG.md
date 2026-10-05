@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## Unreleased
 
+### Changed
+
+- CI runs the live integration test against vendored Cocos Creator 3.7.4 and 3.8.3 fixtures in addition to 3.8.8.
+- `fixture/build.sh` runs under Git Bash on Windows.
+
 ## 0.1.9
 
 ### Changed

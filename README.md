@@ -197,7 +197,7 @@ npm run install:chromium
 npm run check
 ```
 
-`npm run check` type-checks, builds, runs the self-contained Node.js tests, exercises a vendored Cocos Creator 3.8.8 web fixture through live Chromium and CDP, packs the npm tarball, installs it into a temporary project, and smoke-tests the installed binary. Use it before pushing. `npm test` remains available for build plus self-tests only; `npm run test:integration` runs the live browser test separately.
+`npm run check` type-checks, builds, runs the self-contained Node.js tests, exercises vendored Cocos Creator 3.7.4, 3.8.3, and 3.8.8 web fixtures through live Chromium and CDP, packs the npm tarball, installs it into a temporary project, and smoke-tests the installed binary. Use it before pushing. `npm test` remains available for build plus self-tests only; `npm run test:integration` runs the live browser test separately.
 
 The test suite covers URL policy, CDP connection reuse and recovery, scene traversal, property redaction and cycle handling, output bounds, Cocos version rejection, strict tool schemas, exact tool annotations, real page selection, inspector and debugger tools, visual bounds/capture, snapshots, diagnostics, and browser reconnection. CI installs the matching Playwright Chromium revision, runs the full check on Ubuntu and Windows with Node.js 20, 22, and 24, and rejects high-severity production dependency advisories.
 

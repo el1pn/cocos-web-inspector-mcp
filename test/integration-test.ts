@@ -11,7 +11,8 @@ import { chromium, type Browser, type BrowserContext, type Page } from 'playwrig
 import { BrowserConnection } from '../src/browser.js';
 import { createServer } from '../src/server.js';
 
-const fixtureRoot = resolve('test/fixtures/cocos-3.8.8');
+// Each version is a vendored Web Mobile debug build of fixture/ (see docs/COMPATIBILITY.md).
+const creatorVersions = ['3.7.4', '3.8.3', '3.8.8'];
 const productionFixtureRoot = resolve('test/fixtures/cocos-3.8.8-production');
 const contentTypes: Record<string, string> = {
   '.bin': 'application/octet-stream',
@@ -37,7 +38,7 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
 }
 
-function createFixtureServer(root = fixtureRoot): Server {
+function createFixtureServer(root: string): Server {
   return createHttpServer(async (request, response) => {
     try {
       const pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname);
@@ -176,8 +177,8 @@ test('production fixture checksum and live Cocos canaries pass', { timeout: 90_0
   }
 });
 
-test('live Chromium exercises Cocos inspection, selection, highlight, and reconnect', { timeout: 90_000 }, async () => {
-  const fixtureServer = createFixtureServer();
+for (const version of creatorVersions) test(`live Chromium exercises Cocos ${version} inspection, selection, highlight, and reconnect`, { timeout: 90_000 }, async () => {
+  const fixtureServer = createFixtureServer(resolve(`test/fixtures/cocos-${version}`));
   const fixturePort = await listen(fixtureServer);
   const pageUrl = `http://127.0.0.1:${fixturePort}/`;
   const cdpPort = await reservePort();
@@ -197,7 +198,7 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
 
     const pages = await call(client, 'cocos_list_pages', {});
     assert.equal(pages.pages.length, 1);
-    assert.deepEqual(pages.pages[0].cocos, { detected: true, version: '3.8.8', sceneName: 'InspectorTest' });
+    assert.deepEqual(pages.pages[0].cocos, { detected: true, version, sceneName: 'InspectorTest' });
     assert.equal(pages.pages[0].url, pageUrl);
 
     const runtime = await call(client, 'cocos_runtime_info', { pageUrl });
@@ -216,7 +217,7 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
     assert.equal(diagnostics.unavailableMetrics.drawCalls, undefined);
 
     const tree = await call(client, 'cocos_scene_tree', { pageUrl, maxDepth: 6, maxNodes: 50 });
-    assert.equal(tree.version, '3.8.8');
+    assert.equal(tree.version, version);
     assert.equal(tree.scene.name, 'InspectorTest');
     assert.ok(tree.nodeCount >= 6);
     assert.deepEqual(tree.scene.children[0].children.map((node: { name: string }) => node.name), ['Panel', 'UICamera']);
