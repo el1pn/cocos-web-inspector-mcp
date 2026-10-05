@@ -203,6 +203,12 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
         annotations: runtimeMutation,
       }, input => execute({ action }, input.pageUrl));
     }
+
+    server.registerTool('cocos_step_frame', {
+      description: 'Advance a paused Cocos game by fixed-delta frames through cc.game.step; requires cocos_pause first.',
+      inputSchema: z.object({ pageUrl, frames: z.number().int().min(1).max(60).optional() }).strict(),
+      annotations: { ...runtimeMutation, idempotentHint: false },
+    }, input => execute({ action: 'stepFrame', frames: input.frames }, input.pageUrl));
   }
 
   server.registerTool('cocos_highlight_node', {

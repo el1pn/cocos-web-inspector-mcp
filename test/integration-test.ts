@@ -288,7 +288,19 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
     const waited = await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', equals: 7, timeoutMs: 1_000 });
     assert.deepEqual(waited, { matched: true, key: 'count', value: 7, polls: 1 });
     assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', equals: 8, timeoutMs: 300 })).matched, false);
+    assert.equal((await client.callTool({ name: 'cocos_step_frame', arguments: { pageUrl } })).isError, true);
+    // A new scheduler timer spends its first update initializing, so register it while the game still runs.
+    await page.evaluate(() => {
+      const root = globalThis as any;
+      root.cc.director.getScheduler().schedule(() => { root.__ticks = (root.__ticks ?? 0) + 1; }, root.cc.director.getScene(), 0, false);
+    });
+    await page.waitForFunction(() => (globalThis as any).__ticks > 0);
     assert.equal((await call(client, 'cocos_pause', { pageUrl })).after.paused, true);
+    await page.evaluate(() => { (globalThis as any).__ticks = 0; });
+    const stepped = await call(client, 'cocos_step_frame', { pageUrl, frames: 3 });
+    assert.equal(stepped.after.totalFrames - stepped.before.totalFrames, 3);
+    assert.equal(await page.evaluate(() => (globalThis as any).__ticks), 3);
+    assert.equal((await call(client, 'cocos_runtime_info', { pageUrl })).director.paused, true);
     assert.equal((await call(client, 'cocos_resume', { pageUrl })).after.paused, false);
     assert.equal(JSON.stringify(properties).includes('must-not-be-returned'), false);
     assert.equal(JSON.stringify(properties).includes('Property getter was invoked'), false);

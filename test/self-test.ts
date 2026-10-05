@@ -211,6 +211,18 @@ test('bridge traverses, finds, and lists fake Cocos data', () => withFakeCocos((
   });
   assert.deepEqual(inspectCocos({ action: 'pause' }), { changed: true, target: {}, before: { paused: false, running: true }, after: { paused: true, running: false }, runtimeOnly: true });
   assert.deepEqual(inspectCocos({ action: 'resume' }), { changed: true, target: {}, before: { paused: true, running: false }, after: { paused: false, running: true }, runtimeOnly: true });
+
+  // Real director.tick skips logic while director-paused, so the step must run unpaused and re-pause.
+  const cc = (globalThis as any).cc;
+  let frames = 0;
+  const pausedDuringStep: boolean[] = [];
+  cc.director.getTotalFrames = () => frames;
+  cc.game = { isPaused: () => false, step: () => { pausedDuringStep.push(cc.director.isPaused()); frames++; } };
+  assert.throws(() => inspectCocos({ action: 'stepFrame' }), /pause the game before stepping/);
+  inspectCocos({ action: 'pause' });
+  assert.deepEqual(inspectCocos({ action: 'stepFrame', frames: 3 }), { changed: true, target: {}, before: { totalFrames: 0 }, after: { totalFrames: 3 }, runtimeOnly: true });
+  assert.deepEqual(pausedDuringStep, [false, false, false]);
+  assert.equal(cc.director.isPaused(), true);
 }));
 
 test('property serializer avoids getters, secrets, and cycles', () => withFakeCocos(() => {
@@ -426,6 +438,7 @@ test('MCP exposes opted-in node active mutation with strict input', async () => 
       });
     }
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_click_node')?.annotations?.idempotentHint, false);
+    assert.equal(tools.tools.find(tool => tool.name === 'cocos_step_frame')?.annotations?.idempotentHint, false);
     const invalid = await client.callTool({ name: 'cocos_set_node_active', arguments: { uuid: 'x', active: true, extra: true } });
     assert.equal(invalid.isError, true);
   } finally {

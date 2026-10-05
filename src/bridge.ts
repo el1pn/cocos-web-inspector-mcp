@@ -15,7 +15,8 @@ export type BridgeRequest =
   | { action: 'setTransform'; uuid: string; position?: Vector3 | undefined; rotation?: Quaternion | undefined; scale?: Vector3 | undefined }
   | { action: 'setProperty'; uuid: string; componentUuid: string; key: string; value: PropertyValue }
   | { action: 'pause' }
-  | { action: 'resume' };
+  | { action: 'resume' }
+  | { action: 'stepFrame'; frames?: number | undefined };
 
 type Vector3 = { x: number; y: number; z: number };
 type Quaternion = { x: number; y: number; z: number; w: number };
@@ -553,6 +554,21 @@ export function inspectCocos(request: BridgeRequest): unknown {
     if (request.action === 'pause' ? !before.paused : before.paused) cc.director[method]();
     const after = directorState();
     return { changed: before.paused !== after.paused, target: {}, before, after, runtimeOnly: true };
+  }
+
+  if (request.action === 'stepFrame') {
+    const game = cc.game;
+    if (typeof game?.step !== 'function' || typeof game.isPaused !== 'function' || typeof cc.director?.getTotalFrames !== 'function') invalidMutation('game.step is unavailable');
+    const directorPaused = directorState().paused;
+    if (!directorPaused && !game.isPaused()) invalidMutation('pause the game before stepping');
+    const before = cc.director.getTotalFrames();
+    // game.step ticks the director, which skips logic while director-paused; unpause only inside this synchronous call.
+    for (let frame = 0; frame < (request.frames ?? 1); frame++) {
+      if (directorPaused) cc.director.resume();
+      try { game.step(); } finally { if (directorPaused) cc.director.pause(); }
+    }
+    const after = cc.director.getTotalFrames();
+    return { changed: after !== before, target: {}, before: { totalFrames: before }, after: { totalFrames: after }, runtimeOnly: true };
   }
 
   if (request.action === 'setNodeActive') {

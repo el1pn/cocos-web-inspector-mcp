@@ -252,11 +252,11 @@ Requirements:
 - Do not save files by default.
 - Do not capture a full page as an implicit fallback.
 
-## Phase 5 — Debugging workflows — Snapshot complete; frame stepping blocked on compatibility evidence
+## Phase 5 — Debugging workflows — Complete
 
-### `cocos_step_frame`
+### `cocos_step_frame` — Complete
 
-Advance one frame while paused only if a stable public API exists across the supported compatibility matrix.
+Advance one frame while paused only if a stable public API exists across the supported compatibility matrix. Implemented on `cc.game.step`, verified on 3.6.3, 3.7.4, 3.8.3, and 3.8.8.
 
 ### Stateless snapshot comparison
 

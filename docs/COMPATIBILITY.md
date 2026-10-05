@@ -24,11 +24,11 @@ To reproduce, copy the fixture project outside `/tmp`, set `creator.version`, an
 ## Current limits
 
 - Cocos Creator releases older than 3.6.3: unverified. Cocos Creator 2.x is rejected.
-- Frame stepping: unsupported; no stable public API has been verified across a compatibility matrix.
+- Frame stepping: `cc.game.step`, `director.getTotalFrames`, and `director.pause`/`resume` are public and behave identically on 3.6.3, 3.7.4, 3.8.3, and 3.8.8 (verified live: N steps run N logic ticks, the game stays paused).
 - FPS, frame time, draw calls, triangles, generic invalid-component-reference diagnostics: unavailable unless a stable passive public API is verified.
 
 ## Supported operations for 3.8.8 fixture
 
 Inspector mode: page discovery, runtime info, scene tree, node search/context/components/properties, bounds, temporary highlight, node capture, snapshots, hierarchy diagnostics.
 
-Runtime debugger mode (`--allow-runtime-mutation`): node activation, selected transforms, bounded public component properties, pause, and resume. Runtime changes are not transactional and disappear after reload.
+Runtime debugger mode (`--allow-runtime-mutation`): node activation, selected transforms, bounded public component properties, pause, resume, and frame stepping. Runtime changes are not transactional and disappear after reload.
