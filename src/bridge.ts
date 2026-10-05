@@ -263,13 +263,25 @@ export function inspectCocos(request: BridgeRequest): unknown {
       }
     });
     const duplicateNames = [...names.entries()].filter(([, uuids]) => uuids.length > 1).slice(0, 100).map(([name, uuids]) => ({ name, uuids, count: uuids.length }));
+    // Root and the GFX device update these every frame whether or not the profiler is shown; read backing fields, never getters.
+    const renderRoot = cc.director && typeof cc.director === 'object' ? dataProperty(cc.director, '_root') : undefined;
+    const device = renderRoot && typeof renderRoot === 'object' ? dataProperty(renderRoot, '_device') : undefined;
+    const metric = (owner: unknown, key: string) => {
+      const value = owner && typeof owner === 'object' ? dataProperty(owner, key) : undefined;
+      return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+    };
+    const render = { fps: metric(renderRoot, '_fps'), frameTimeMs: metric(renderRoot, '_frameTime'), drawCalls: metric(device, '_numDrawCalls'), triangles: metric(device, '_numTris'), instances: metric(device, '_numInstances') };
+    if (render.frameTimeMs !== undefined) render.frameTimeMs *= 1_000;
+    const unavailableMetrics: Record<string, string> = { invalidComponentReferences: 'UNSUPPORTED_PUBLIC_API' };
+    for (const [key, value] of Object.entries(render)) if (value === undefined) unavailableMetrics[key] = 'UNSUPPORTED_PUBLIC_API';
     return {
       version,
       nodeCount,
       componentCount,
       maxHierarchyDepth: maxDepth,
       duplicateNames,
-      unavailableMetrics: { fps: 'UNSUPPORTED_PUBLIC_API', frameTime: 'UNSUPPORTED_PUBLIC_API', drawCalls: 'UNSUPPORTED_PUBLIC_API', triangles: 'UNSUPPORTED_PUBLIC_API', invalidComponentReferences: 'UNSUPPORTED_PUBLIC_API' },
+      render: Object.fromEntries(Object.entries(render).filter(([, value]) => value !== undefined)),
+      unavailableMetrics,
       truncated: traversal.truncated || duplicateNames.length >= 100,
       truncationReasons: traversal.truncated || duplicateNames.length >= 100 ? ['NODE_LIMIT'] : [],
     };

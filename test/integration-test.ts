@@ -207,7 +207,13 @@ test('live Chromium exercises Cocos inspection, selection, highlight, and reconn
     assert.ok(diagnostics.nodeCount >= 6);
     assert.ok(diagnostics.componentCount >= 1);
     assert.ok(diagnostics.maxHierarchyDepth >= 1);
-    assert.equal(diagnostics.unavailableMetrics.drawCalls, 'UNSUPPORTED_PUBLIC_API');
+    assert.ok(diagnostics.render.drawCalls > 0, JSON.stringify(diagnostics.render));
+    assert.ok(diagnostics.render.triangles > 0);
+    assert.ok(diagnostics.render.frameTimeMs > 0);
+    // Root publishes fps once per elapsed second, so it stays 0 right after the scene loads.
+    await page.waitForFunction(() => (globalThis as any).cc.director.root.fps > 0);
+    assert.ok((await call(client, 'cocos_runtime_diagnostics', { pageUrl })).render.fps > 0);
+    assert.equal(diagnostics.unavailableMetrics.drawCalls, undefined);
 
     const tree = await call(client, 'cocos_scene_tree', { pageUrl, maxDepth: 6, maxNodes: 50 });
     assert.equal(tree.version, '3.8.8');

@@ -171,6 +171,20 @@ test('bridge traverses, finds, and lists fake Cocos data', () => withFakeCocos((
   assert.equal(diagnostics.componentCount, 2);
   assert.equal(diagnostics.maxHierarchyDepth, 1);
   assert.equal(diagnostics.unavailableMetrics.fps, 'UNSUPPORTED_PUBLIC_API');
+  assert.deepEqual(diagnostics.render, {});
+
+  // Render metrics come from Root/device backing fields; their public getters must not run.
+  class Device { _numDrawCalls = 12; _numTris = 340; _numInstances = 0; }
+  class Root { _fps = 59; _frameTime = 0.016; _device = new Device(); }
+  for (const proto of [Device.prototype, Root.prototype]) {
+    for (const key of ['fps', 'frameTime', 'numDrawCalls', 'numTris', 'device']) Object.defineProperty(proto, key, { get: () => { throw new Error('metric getter ran'); } });
+  }
+  const director = (globalThis as any).cc.director;
+  director._root = new Root();
+  const rendered = inspectCocos({ action: 'runtimeDiagnostics' }) as any;
+  delete director._root;
+  assert.deepEqual(rendered.render, { fps: 59, frameTimeMs: 16, drawCalls: 12, triangles: 340, instances: 0 });
+  assert.deepEqual(rendered.unavailableMetrics, { invalidComponentReferences: 'UNSUPPORTED_PUBLIC_API' });
   assert.deepEqual(runtime.visibleSize, { width: 1280, height: 720 });
   assert.deepEqual(runtime.director, { paused: false, running: true });
   assert.equal(runtime.nodeCount, 2);

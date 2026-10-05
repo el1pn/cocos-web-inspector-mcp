@@ -25,7 +25,7 @@ To reproduce, copy the fixture project outside `/tmp`, set `creator.version`, an
 
 - Cocos Creator releases older than 3.6.3: unverified. Cocos Creator 2.x is rejected.
 - Frame stepping: `cc.game.step`, `director.getTotalFrames`, and `director.pause`/`resume` are public and behave identically on 3.6.3, 3.7.4, 3.8.3, and 3.8.8 (verified live: N steps run N logic ticks, the game stays paused).
-- FPS, frame time, draw calls, triangles, generic invalid-component-reference diagnostics: unavailable unless a stable passive public API is verified.
+- Render metrics: `root.fps`/`frameTime` and `device.numDrawCalls`/`numTris`/`numInstances` exist with the same backing fields on 3.6.3, 3.7.4, 3.8.3, and 3.8.8 and update with the profiler hidden. Generic invalid-component-reference diagnostics remain unavailable.
 
 ## Supported operations for 3.8.8 fixture
 

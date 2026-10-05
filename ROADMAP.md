@@ -270,7 +270,7 @@ Mutation results should contain enough previous state for the client to request 
 
 Do not add a general `cocos_invoke_method` tool. Add narrowly scoped commands for validated use cases instead.
 
-## Phase 6 — Runtime diagnostics — Hierarchy diagnostics complete; render metrics blocked on public API evidence
+## Phase 6 — Runtime diagnostics — Hierarchy and render metrics complete; invalid-reference detection not started
 
 Add only metrics available through stable, public Cocos APIs:
 
