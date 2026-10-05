@@ -9,6 +9,7 @@ All notable changes are documented here.
 ### Fixed
 
 - Publish from Node 24 so npm trusted publishing authenticates the release; 0.1.2 through 0.1.4 were tagged but never reached npm.
+- Drop `--provenance`: sigstore verification requires a public source repository, and this repo is private.
 
 ## 0.1.4
 
