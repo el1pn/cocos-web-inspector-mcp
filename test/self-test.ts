@@ -451,7 +451,7 @@ test('MCP exposes opted-in node active mutation with strict input', async () => 
         openWorldHint: false,
       });
     }
-    assert.equal(tools.tools.find(tool => tool.name === 'cocos_click_node')?.annotations?.idempotentHint, false);
+    assert.deepEqual(tools.tools.find(tool => tool.name === 'cocos_click_node')?.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_step_frame')?.annotations?.idempotentHint, false);
     const invalid = await client.callTool({ name: 'cocos_set_node_active', arguments: { uuid: 'x', active: true, extra: true } });
     assert.equal(invalid.isError, true);

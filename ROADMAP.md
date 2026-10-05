@@ -289,12 +289,12 @@ Before `1.0.0`:
 
 - Live integration tests pass on supported platforms.
 - The Cocos compatibility matrix is documented and verified.
-- Inspector and debugger modes have separate, accurate MCP annotations.
+- Inspector and debugger modes have separate, accurate MCP annotations. (Done: inspectors read-only; debugger tools mutate runtime state; `cocos_click_node` destructive and open-world.)
 - Every mutation requires startup-time opt-in.
 - Every tool has strict schemas and bounded output.
 - Production/minified web builds are covered. (Cocos Creator 3.8.8 Web Mobile fixture verified.)
 - Windows and Linux CI run the complete local gate.
-- Node.js LTS versions supported by the package are tested.
+- Node.js LTS versions supported by the package are tested. (Done: CI runs Node.js 20, 22, and 24 on Ubuntu and Windows.)
 - `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist.
 - npm releases use a reviewed automated workflow and provenance where supported.
 

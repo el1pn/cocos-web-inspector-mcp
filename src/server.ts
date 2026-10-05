@@ -185,9 +185,10 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
     }, input => execute({ action: 'setProperty', uuid: input.uuid, componentUuid: input.componentUuid, key: input.key, value: input.value }, input.pageUrl));
 
     server.registerTool('cocos_click_node', {
-      description: 'Dispatch a real mouse click at the visible center of one Cocos UI node, so Button and touch handlers run.',
+      description: 'Dispatch a real mouse click at the visible center of one Cocos UI node, so Button and touch handlers run. Handlers may call game servers or make irreversible changes.',
       inputSchema: z.object({ pageUrl, uuid: z.string().min(1) }).strict(),
-      annotations: { ...runtimeMutation, idempotentHint: false },
+      // Game click handlers run arbitrary code: a login button reaches real servers, a buy button spends currency.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     }, async input => {
       try {
         return response(await clickNode(await browser.page(input.pageUrl), input.uuid));
