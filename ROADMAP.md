@@ -283,7 +283,7 @@ Add only metrics available through stable, public Cocos APIs:
 
 Diagnostics must remain observational. They must not silently enable profiling systems or modify game configuration.
 
-## Phase 7 — Release readiness — CI/docs and 3.8.8 production compatibility complete; broader matrix pending handoff
+## Phase 7 — Release readiness — CI/docs and 3.8.8 production compatibility complete; 3.6.3–3.8.3 verified manually, not in CI
 
 Before `1.0.0`:
 

@@ -4,6 +4,10 @@ All notable changes are documented here.
 
 ## Unreleased
 
+### Changed
+
+- Compatibility matrix lists Cocos Creator 3.6.3, 3.7.4, and 3.8.3 as manually verified with every tool; only 3.8.8 remains vendored in CI.
+
 ## 0.1.7
 
 ### Changed

@@ -9,9 +9,21 @@
 
 The debug fixture contract is [fixture-manifest.json](../test/fixtures/cocos-3.8.8/fixture-manifest.json). Production provenance and checksum are vendored at [fixture-production-provenance.json](../test/fixtures/cocos-3.8.8-production/fixture-production-provenance.json) and [build-production-checksums.sha256](../test/fixtures/cocos-3.8.8-production/build-production-checksums.sha256). Sibling-project handoff requires a checksum manifest and provenance metadata before vendored generated artifacts are updated.
 
+## Manually verified versions
+
+These were verified live but are not vendored, so CI does not guard them. Each build came from fixture source commit `58fec3ca0daaafa35f2470fb4785319ee0535cbc` with only `package.json` `creator.version` changed, built headlessly as Web Mobile debug with `build-dev.json`.
+
+| Cocos Creator | Build target | Verified on | Coverage |
+| --- | --- | --- | --- |
+| 3.8.3 | Web Mobile debug | 2026-10-05, MCP 0.1.7 | Every inspector and runtime debugger tool, including display fields, click, wait, inactive bounds, redaction, and getter safety |
+| 3.7.4 | Web Mobile debug | 2026-10-05, MCP 0.1.7 | Same as 3.8.3 |
+| 3.6.3 | Web Mobile debug | 2026-10-05, MCP 0.1.7 | Same as 3.8.3 |
+
+To reproduce, copy the fixture project outside `/tmp`, set `creator.version`, and run the target Creator CLI with `--build "configPath=<project>/build-dev.json"`. A project under `/tmp` (a symlink to `/private/tmp` on macOS) makes Creator 3.8.3 record the custom script under both paths and drop it from the build with `Missing class`.
+
 ## Current limits
 
-- Other Cocos Creator versions: unverified.
+- Cocos Creator releases older than 3.6.3: unverified. Cocos Creator 2.x is rejected.
 - Frame stepping: unsupported; no stable public API has been verified across a compatibility matrix.
 - FPS, frame time, draw calls, triangles, generic invalid-component-reference diagnostics: unavailable unless a stable passive public API is verified.
 
