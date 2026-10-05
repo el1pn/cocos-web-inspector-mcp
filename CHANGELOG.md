@@ -4,6 +4,8 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.8
+
 ### Added
 
 - `cocos_step_frame` advances a paused game by 1–60 fixed-delta frames through the public `cc.game.step`, then stays paused; registered only with `--allow-runtime-mutation`. Verified on Creator 3.6.3, 3.7.4, 3.8.3, and 3.8.8.
