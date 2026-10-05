@@ -4,6 +4,8 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 0.1.9
+
 ### Changed
 
 - Releases publish with npm provenance and require reviewer approval of the `npm` environment; the repository is public.
