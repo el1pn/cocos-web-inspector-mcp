@@ -300,6 +300,64 @@ Before `1.0.0`:
 - `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist. (Done.)
 - npm releases use a reviewed automated workflow and provenance where supported. (Done: reviewed `npm` environment, tag-only deploys, provenance.)
 
+## Phase 8 — User-facing tooling without an extension
+
+Earlier phases serve agents. This phase serves the developer at the keyboard. Build on `playwright-core`, CDP sessions, and self-contained in-page JavaScript. Features may borrow ideas from other browser MCP servers such as chrome-devtools-mcp, but must not require them to be installed.
+
+### `launch` command
+
+```powershell
+npx cocos-web-inspector-mcp launch http://localhost:7456 --device "iPhone 14" --port 9223 --profile project-a
+```
+
+Spawn a locally installed Chrome with loopback remote debugging, a dedicated profile, and the game URL, then print the matching `claude mcp add` command. Locate Chrome per OS with a `--chrome-path` override. The MCP server itself still never launches a browser.
+
+### `doctor` command
+
+Check CDP reachability, port ownership, eligible pages, Cocos detection, engine version, and active scene. Print one readable line per check with the structured error code and a fix.
+
+### `cocos_emulate_device`
+
+Debugger mode only. Emulate a mobile viewport like the Cocos preview device list or the Chrome device toolbar through `Emulation.setDeviceMetricsOverride`, `setTouchEmulationEnabled`, and `setUserAgentOverride`.
+
+- Accept a preset from a small table owned by this package, or explicit width, height, device pixel ratio, and mobile flag.
+- Support orientation and `reset`.
+- Document that emulation belongs to the CDP session and ends when the server disconnects.
+
+### `cocos_show_stats`
+
+Debugger mode only. Toggle the engine's FPS, draw-call, and triangle overlay through the public `profiler.showStats()` and `hideStats()` APIs. This is an explicit, opt-in configuration change, unlike the observational Phase 6 diagnostics.
+
+### Node picker
+
+Let the user Alt+click the game canvas to select a node. A pointer-transparent overlay shows its name, path, and shortened UUID; `cocos_get_selection` returns the selection so the user can point instead of describing a node. The picker listener may only read the scene and draw its overlay.
+
+### Batch-break analysis — Deferred
+
+List each 2D draw batch with the node that started it and the reason the previous batch broke: texture, material, stencil or mask, or layer. Optionally tint batches on the canvas.
+
+Batches clear every frame and `DrawBatch` keeps no node reference, so this needs a one-frame hook on `batcher2D.commitComp` read after `EVENT_AFTER_RENDER`, and private fields verified on every matrix version. Start only when a real project shows a draw-call problem; gate it behind debugger mode and remove the hook after the captured frame.
+
+## Phase 9 — Browser extension — Proposed
+
+Some workflows need UI that an MCP server cannot provide. Build them as an optional Chrome extension that reuses the self-contained `inspectCocos` bridge, not as a second implementation.
+
+Candidate features:
+
+- A DevTools panel with a live scene tree, node search, and component properties.
+- Persistent node picker and selection highlight without a CDP connection.
+- Property editing from the panel, limited to the Phase 2 allowlist.
+- Batch-break visualization from Phase 8, once it exists.
+- Device preset and orientation switcher.
+
+Open decisions before starting:
+
+- How the extension and the MCP server share selection without native messaging or a new network listener.
+- Whether the extension runs in the user's normal profile, which the CDP path deliberately avoids.
+- Publishing, review, and update cost for the Chrome Web Store compared with an unpacked developer build.
+
+Existing extensions such as ccc-devtools and cocos-inspector already cover the basic tree view. Start this phase only for features they lack.
+
 ## Non-goals
 
 The project should not add:
@@ -324,3 +382,6 @@ The project should not add:
 8. Component UUID inspection and richer node context.
 9. Reliable bounds and visual debugging.
 10. Frame stepping, snapshots, and runtime diagnostics based on demonstrated demand.
+11. `launch`, `doctor`, `cocos_emulate_device`, and `cocos_show_stats`.
+12. Node picker.
+13. Batch-break analysis and the browser extension based on demonstrated demand.
