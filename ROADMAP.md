@@ -322,6 +322,7 @@ Debugger mode only. Emulate a mobile viewport like the Cocos preview device list
 
 - Accept a preset from a small table owned by this package, or explicit width, height, device pixel ratio, and mobile flag.
 - Support orientation and `reset`.
+- Optionally slow the page down like a low-end phone: a bounded CPU slowdown factor through `Emulation.setCPUThrottlingRate`, and a network profile (offline, slow 3G, fast 3G, slow 4G) through `Network.emulateNetworkConditions`. Throttling only delays traffic; it never reads requests or responses.
 - Document that emulation belongs to the CDP session and ends when the server disconnects.
 
 ### `cocos_show_stats`
