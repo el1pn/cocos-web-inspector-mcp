@@ -67958,9 +67958,9 @@ System.register([], function (exports, module) {
       async function initialize(isWasm) {
           let ammo;
           if (isWasm) {
-              ammo = await module.import('./bullet.wasm-8030beac.js');
+              ammo = await module.import('./bullet.wasm-cc75b2f9.js');
           } else {
-              ammo = await module.import('./bullet.cocos-de43c225.js');
+              ammo = await module.import('./bullet.cocos-07aa21ef.js');
           }
           return ammo.default;
       }

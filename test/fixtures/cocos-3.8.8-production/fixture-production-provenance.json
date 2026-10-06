@@ -16,7 +16,7 @@
     ]
   },
   "provenance": {
-    "sourceCommit": "c818decf82960e829f6a74e3760d4cd027b8ba39",
+    "sourceCommit": "79a8ffa56ef317c98691a0dcd43f5171948d8c5e",
     "dirtyStateAtBuild": "clean",
     "buildConfig": "build-production.json",
     "buildCommand": "fixture/build.sh 3.8.8"
@@ -78,7 +78,8 @@
         "buttonInteractable": true,
         "spriteFrameName": "default_sprite_splash",
         "toggleChecked": true,
-        "richTextString": "<b>Rich</b> fixture"
+        "richTextString": "<b>Rich</b> fixture",
+        "staleNodeDestroyed": true
       }
     }
   }

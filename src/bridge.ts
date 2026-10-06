@@ -442,7 +442,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
       const uuid = dataProperty(value, 'uuid') ?? dataProperty(value, '_id');
       // CCObject.isValid is a getter over this flag (Destroyed = 1 << 0 in 3.6-3.8); destroy also nulls _children/node.
       const flags = dataProperty(value, '_objFlags');
-      if (reference && typeof flags === 'number' && flags & 1) return { $type: componentName(value), uuid: String(uuid ?? ''), destroyed: true };
+      if (reference && typeof flags === 'number' && flags & 1) return { $type: typeof cc.Node === 'function' && value instanceof cc.Node ? 'Node' : componentName(value), uuid: String(uuid ?? ''), destroyed: true };
       if (reference && uuid && Array.isArray(dataProperty(value, 'children') ?? dataProperty(value, '_children'))) {
         return { $type: 'Node', uuid: String(uuid), name: String(dataProperty(value, 'name') ?? dataProperty(value, '_name') ?? '').slice(0, 500) };
       }

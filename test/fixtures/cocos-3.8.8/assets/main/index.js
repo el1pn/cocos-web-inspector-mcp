@@ -1,5 +1,5 @@
 System.register("chunks:///_virtual/InspectorFixture.ts", ['./rollupPluginModLoBabelHelpers.js', 'cc'], function (exports) {
-  var _applyDecoratedDescriptor, _inheritsLoose, _initializerDefineProperty, _assertThisInitialized, cclegacy, _decorator, Component;
+  var _applyDecoratedDescriptor, _inheritsLoose, _initializerDefineProperty, _assertThisInitialized, cclegacy, _decorator, Node, Component;
   return {
     setters: [function (module) {
       _applyDecoratedDescriptor = module.applyDecoratedDescriptor;
@@ -9,6 +9,7 @@ System.register("chunks:///_virtual/InspectorFixture.ts", ['./rollupPluginModLoB
     }, function (module) {
       cclegacy = module.cclegacy;
       _decorator = module._decorator;
+      Node = module.Node;
       Component = module.Component;
     }],
     execute: function () {
@@ -33,10 +34,14 @@ System.register("chunks:///_virtual/InspectorFixture.ts", ['./rollupPluginModLoB
             category: 'manual-test',
             password: 'must-not-be-returned'
           };
+          // Runtime-only reference to a node destroyed in onLoad; the inspector must flag it destroyed.
+          _this.staleNode = null;
           return _this;
         }
         var _proto = InspectorFixture.prototype;
         _proto.onLoad = function onLoad() {
+          this.staleNode = new Node('StaleNode');
+          this.staleNode.destroy();
           Object.defineProperty(this, 'mustNotRun', {
             enumerable: true,
             get: function get() {
