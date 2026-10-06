@@ -1,4 +1,4 @@
-import type { Page } from 'playwright-core';
+import type { CDPSession, Page } from 'playwright-core';
 
 export type BridgeRequest =
   | { action: 'sceneTree'; maxDepth?: number | undefined; maxNodes?: number | undefined }
@@ -16,7 +16,8 @@ export type BridgeRequest =
   | { action: 'setProperty'; uuid: string; componentUuid: string; key: string; value: PropertyValue }
   | { action: 'pause' }
   | { action: 'resume' }
-  | { action: 'stepFrame'; frames?: number | undefined };
+  | { action: 'stepFrame'; frames?: number | undefined }
+  | { action: 'showStats'; visible: boolean };
 
 type Vector3 = { x: number; y: number; z: number };
 type Quaternion = { x: number; y: number; z: number; w: number };
@@ -68,6 +69,104 @@ export async function clickNode(page: Page, uuid: string): Promise<unknown> {
   const point = { x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 };
   await page.mouse.click(point.x, point.y);
   return { clicked: true, target: { nodeUuid: uuid }, point, runtimeOnly: true };
+}
+
+const IOS_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+const IPAD_UA = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+const androidUa = (model: string) => `Mozilla/5.0 (Linux; Android 14; ${model}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36`;
+export const devicePresets = {
+  'iphone-se': { width: 375, height: 667, deviceScaleFactor: 2, mobile: true, userAgent: IOS_UA },
+  'iphone-14': { width: 390, height: 844, deviceScaleFactor: 3, mobile: true, userAgent: IOS_UA },
+  'iphone-14-pro-max': { width: 430, height: 932, deviceScaleFactor: 3, mobile: true, userAgent: IOS_UA },
+  'pixel-7': { width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true, userAgent: androidUa('Pixel 7') },
+  'galaxy-s20': { width: 360, height: 800, deviceScaleFactor: 3, mobile: true, userAgent: androidUa('SM-G981B') },
+  'ipad-mini': { width: 768, height: 1024, deviceScaleFactor: 2, mobile: true, userAgent: IPAD_UA },
+} as const;
+export type DevicePreset = keyof typeof devicePresets;
+export const devicePresetNames = Object.keys(devicePresets) as [DevicePreset, ...DevicePreset[]];
+// Chrome DevTools throttling presets, in bytes per second and milliseconds.
+const networkProfiles = {
+  online: { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 },
+  offline: { offline: true, latency: 0, downloadThroughput: -1, uploadThroughput: -1 },
+  'slow-3g': { offline: false, latency: 2_000, downloadThroughput: 50_000, uploadThroughput: 50_000 },
+  'fast-3g': { offline: false, latency: 562.5, downloadThroughput: 180_000, uploadThroughput: 84_375 },
+  'fast-4g': { offline: false, latency: 165, downloadThroughput: 1_012_500, uploadThroughput: 168_750 },
+} as const;
+export type NetworkProfile = keyof typeof networkProfiles;
+export const networkProfileNames = Object.keys(networkProfiles) as [NetworkProfile, ...NetworkProfile[]];
+
+export type EmulationRequest = {
+  reset?: boolean | undefined;
+  preset?: DevicePreset | undefined;
+  width?: number | undefined;
+  height?: number | undefined;
+  deviceScaleFactor?: number | undefined;
+  mobile?: boolean | undefined;
+  orientation?: 'portrait' | 'landscape' | undefined;
+  cpuSlowdown?: number | undefined;
+  network?: NetworkProfile | undefined;
+  reload?: boolean | undefined;
+};
+type EmulationState = {
+  device?: { preset?: DevicePreset; width: number; height: number; deviceScaleFactor: number; mobile: boolean; orientation: 'portrait' | 'landscape'; userAgent?: string };
+  cpuSlowdown?: number;
+  network?: NetworkProfile;
+};
+// Chrome drops every override when the owning CDP session detaches, so the session lives as long as the emulation.
+const emulations = new WeakMap<Page, { session: CDPSession; state: EmulationState }>();
+
+export async function emulateDevice(page: Page, request: EmulationRequest): Promise<unknown> {
+  const current = emulations.get(page);
+  const before = current?.state ?? {};
+  let after: EmulationState = {};
+  if (request.reset) {
+    emulations.delete(page);
+    if (current) {
+      await applyEmulation(current.session, {});
+      await current.session.detach().catch(() => {});
+    }
+  } else {
+    after = { ...before };
+    const base = request.preset ? { preset: request.preset, ...devicePresets[request.preset] }
+      : request.width !== undefined && request.height !== undefined ? { width: request.width, height: request.height, deviceScaleFactor: request.deviceScaleFactor ?? 1, mobile: request.mobile ?? false }
+        : before.device;
+    if (request.orientation && !base) throw new Error('Invalid mutation: orientation needs a preset or width and height');
+    if (base) after.device = { ...base, orientation: request.orientation ?? (base === before.device ? before.device.orientation : 'portrait') };
+    if (request.cpuSlowdown !== undefined) after.cpuSlowdown = request.cpuSlowdown;
+    if (request.network) after.network = request.network;
+    const session = current?.session ?? await page.context().newCDPSession(page);
+    emulations.set(page, { session, state: after });
+    await applyEmulation(session, after);
+  }
+  if (request.reload) await page.reload();
+  const report = (state: EmulationState) => {
+    if (!state.device) return state;
+    const { userAgent: _userAgent, ...device } = state.device;
+    const landscape = device.orientation === 'landscape';
+    return { ...state, device: { ...device, width: landscape ? device.height : device.width, height: landscape ? device.width : device.height } };
+  };
+  return { changed: JSON.stringify(before) !== JSON.stringify(after), target: {}, before: report(before), after: report(after), reloaded: !!request.reload, runtimeOnly: true };
+}
+
+async function applyEmulation(session: CDPSession, state: EmulationState): Promise<void> {
+  const device = state.device;
+  if (device) {
+    const landscape = device.orientation === 'landscape';
+    await session.send('Emulation.setDeviceMetricsOverride', {
+      width: landscape ? device.height : device.width,
+      height: landscape ? device.width : device.height,
+      deviceScaleFactor: device.deviceScaleFactor,
+      mobile: device.mobile,
+      screenOrientation: { type: landscape ? 'landscapePrimary' : 'portraitPrimary', angle: landscape ? 90 : 0 },
+    });
+  } else await session.send('Emulation.clearDeviceMetricsOverride');
+  const touch = !!device?.mobile;
+  await session.send('Emulation.setTouchEmulationEnabled', touch ? { enabled: true, maxTouchPoints: 5 } : { enabled: false });
+  // Like the Chrome device toolbar: mouse input arrives as touch, which mobile Cocos builds listen for.
+  await session.send('Emulation.setEmitTouchEventsForMouse', { enabled: touch, configuration: 'mobile' });
+  await session.send('Emulation.setUserAgentOverride', { userAgent: device?.userAgent ?? (await session.send('Browser.getVersion')).userAgent });
+  await session.send('Emulation.setCPUThrottlingRate', { rate: state.cpuSlowdown ?? 1 });
+  await session.send('Network.emulateNetworkConditions', networkProfiles[state.network ?? 'online']);
 }
 
 export function inspectCocosPage(): unknown {
@@ -584,6 +683,15 @@ export function inspectCocos(request: BridgeRequest): unknown {
     }
     const after = cc.director.getTotalFrames();
     return { changed: after !== before, target: {}, before: { totalFrames: before }, after: { totalFrames: after }, runtimeOnly: true };
+  }
+
+  if (request.action === 'showStats') {
+    const profiler = cc.profiler;
+    if (typeof profiler?.isShowingStats !== 'function' || typeof profiler.showStats !== 'function' || typeof profiler.hideStats !== 'function') invalidMutation('profiler stats API is unavailable');
+    const before = Boolean(profiler.isShowingStats());
+    if (before !== request.visible) request.visible ? profiler.showStats() : profiler.hideStats();
+    const after = Boolean(profiler.isShowingStats());
+    return { changed: before !== after, target: {}, before: { visible: before }, after: { visible: after }, runtimeOnly: true };
   }
 
   if (request.action === 'setNodeActive') {

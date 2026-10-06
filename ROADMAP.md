@@ -300,11 +300,11 @@ Before `1.0.0`:
 - `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist. (Done.)
 - npm releases use a reviewed automated workflow and provenance where supported. (Done: reviewed `npm` environment, tag-only deploys, provenance.)
 
-## Phase 8 — User-facing tooling without an extension
+## Phase 8 — User-facing tooling without an extension — In progress
 
 Earlier phases serve agents. This phase serves the developer at the keyboard. Build on `playwright-core`, CDP sessions, and self-contained in-page JavaScript. Features may borrow ideas from other browser MCP servers such as chrome-devtools-mcp, but must not require them to be installed.
 
-### `launch` command
+### `launch` command — Complete
 
 ```powershell
 npx cocos-web-inspector-mcp launch http://localhost:7456 --device "iPhone 14" --port 9223 --profile project-a
@@ -312,11 +312,11 @@ npx cocos-web-inspector-mcp launch http://localhost:7456 --device "iPhone 14" --
 
 Spawn a locally installed Chrome with loopback remote debugging, a dedicated profile, and the game URL, then print the matching `claude mcp add` command. Locate Chrome per OS with a `--chrome-path` override. The MCP server itself still never launches a browser.
 
-### `doctor` command
+### `doctor` command — Complete
 
 Check CDP reachability, port ownership, eligible pages, Cocos detection, engine version, and active scene. Print one readable line per check with the structured error code and a fix.
 
-### `cocos_emulate_device`
+### `cocos_emulate_device` — Complete
 
 Debugger mode only. Emulate a mobile viewport like the Cocos preview device list or the Chrome device toolbar through `Emulation.setDeviceMetricsOverride`, `setTouchEmulationEnabled`, and `setUserAgentOverride`.
 
@@ -325,7 +325,7 @@ Debugger mode only. Emulate a mobile viewport like the Cocos preview device list
 - Optionally slow the page down like a low-end phone: a bounded CPU slowdown factor through `Emulation.setCPUThrottlingRate`, and a network profile (offline, slow 3G, fast 3G, slow 4G) through `Network.emulateNetworkConditions`. Throttling only delays traffic; it never reads requests or responses.
 - Document that emulation belongs to the CDP session and ends when the server disconnects.
 
-### `cocos_show_stats`
+### `cocos_show_stats` — Complete
 
 Debugger mode only. Toggle the engine's FPS, draw-call, and triangle overlay through the public `profiler.showStats()` and `hideStats()` APIs. This is an explicit, opt-in configuration change, unlike the observational Phase 6 diagnostics.
 

@@ -41,6 +41,14 @@ try {
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 1, result.stderr || result.stdout);
   assert.match(result.stderr, /Unknown argument: --invalid-smoke-option/);
+
+  // Port 1 is privileged and never a CDP endpoint, so doctor must report it unreachable.
+  const doctor = spawnSync(process.execPath, [executable, 'doctor', '--cdp-endpoint', 'http://127.0.0.1:1'], { cwd: temporary, encoding: 'utf8', timeout: 20_000 });
+  assert.equal(doctor.status, 1, doctor.stderr || doctor.stdout);
+  assert.match(doctor.stdout, /FAIL {2}CDP_UNAVAILABLE: nothing answers on port 1/);
+  const launch = spawnSync(process.execPath, [executable, 'launch', 'https://example.com/'], { cwd: temporary, encoding: 'utf8', timeout: 10_000 });
+  assert.equal(launch.status, 1);
+  assert.match(launch.stderr, /Only localhost targets are allowed/);
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }

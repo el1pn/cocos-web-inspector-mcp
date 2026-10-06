@@ -4,6 +4,13 @@ All notable changes are documented here.
 
 ## Unreleased
 
+### Added
+
+- `launch` command: starts a local Chrome with loopback remote debugging, a dedicated profile, the game URL, and optional device emulation, then prints the `claude mcp add` command.
+- `doctor` command: checks the CDP endpoint, port owner, localhost pages, Cocos detection, and active scene, with a fix for each failure.
+- `cocos_emulate_device` (debugger mode): device presets or custom viewport, DPR, touch, user agent, orientation, CPU slowdown, and network throttling, with `reset`.
+- `cocos_show_stats` (debugger mode): toggles the engine's FPS, draw-call, and triangle overlay.
+
 ### Breaking
 
 - Requires Node.js 22 or later. Node.js 20 reached end of life in April 2026 and is no longer tested.

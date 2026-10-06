@@ -20,7 +20,24 @@ By default it does not edit Cocos game state, launch browsers, expose browser ne
 - A Chromium browser started with remote debugging bound to loopback
 - A Cocos Creator 3.x web build served from loopback
 
-Start Chrome on Windows with a disposable profile:
+The quickest start launches a locally installed Chrome with a disposable profile, loopback-only remote debugging, and the game URL, then prints the matching `claude mcp add` command:
+
+```powershell
+npx --yes cocos-web-inspector-mcp launch http://localhost:7456/
+npx --yes cocos-web-inspector-mcp launch http://localhost:7456/ --port 9223 --device iphone-14 --landscape --cpu-slowdown 4 --network fast-3g
+```
+
+`launch` options: `--port` (default `9222`), `--profile <dir>` (default a per-port directory under the system temp folder), `--chrome-path` (or `CHROME_PATH`), and the `cocos_emulate_device` settings `--device`, `--landscape`, `--cpu-slowdown`, and `--network`. Chrome drops emulation when its controlling CDP session closes, so with emulation flags the command stays attached; press Ctrl+C to close Chrome. The MCP server itself never launches a browser.
+
+Check a setup step by step, with a fix for each failure:
+
+```powershell
+npx --yes cocos-web-inspector-mcp doctor --cdp-endpoint http://127.0.0.1:9222
+```
+
+`doctor` checks the endpoint policy, what answers on the port, eligible localhost pages, Cocos 3.x detection, and the active scene. It exits with status 1 when a check fails.
+
+Or start Chrome manually on Windows with a disposable profile:
 
 ```powershell
 chrome.exe --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir="$env:TEMP\cocos-mcp-profile"
@@ -56,7 +73,7 @@ Endpoint precedence is:
 2. `COCOS_CDP_ENDPOINT`
 3. `http://127.0.0.1:9222`
 
-`--cdp-endpoint` is the only supported CLI option. It identifies the browser CDP endpoint, not a game page URL.
+`--cdp-endpoint` and `--allow-runtime-mutation` are the only server options; `launch` and `doctor` are separate commands. `--cdp-endpoint` identifies the browser CDP endpoint, not a game page URL.
 
 The server uses stdio for MCP. Standard output is reserved for protocol traffic; startup diagnostics are written to standard error.
 
@@ -112,6 +129,8 @@ All tool input objects are strict. Unknown fields are rejected. Inspection tools
 | `cocos_pause` | Pause the Cocos director when its public API supports it. | `pageUrl?` |
 | `cocos_resume` | Resume the Cocos director when its public API supports it. | `pageUrl?` |
 | `cocos_step_frame` | Advance a paused game by 1–60 fixed-delta frames through `cc.game.step`, then stay paused. Fails unless paused first. | `pageUrl?`, `frames?` |
+| `cocos_show_stats` | Show or hide the engine's FPS, draw-call, and triangle overlay through the public `profiler` API. | `pageUrl?`; `visible` boolean |
+| `cocos_emulate_device` | Emulate a mobile device like the Chrome device toolbar: viewport, DPR, touch (mouse input arrives as touch), user agent, and orientation; optionally slow the CPU or network. Settings merge across calls. | `pageUrl?`; `preset?` (`iphone-se`, `iphone-14`, `iphone-14-pro-max`, `pixel-7`, `galaxy-s20`, `ipad-mini`) or `width`+`height` `200..4000` with `deviceScaleFactor?` `1..4` and `mobile?`; `orientation?`; `cpuSlowdown?` `1..20`; `network?` (`online`, `offline`, `slow-3g`, `fast-3g`, `fast-4g`); `reload?`; or `reset: true` |
 | `cocos_scene_tree` | Return a bounded scene tree with node and component summaries. | `pageUrl?`; `maxDepth?` integer `0..20`, default `6`; `maxNodes?` integer `1..5000`, default `500` |
 | `cocos_find_node` | Find nodes with exact or combined bounded filters. | `pageUrl?`; at least one of `uuid`, `name`, `path`, `nameContains`, `componentType`, `active`, `pathPrefix`; `limit?` integer `1..100`, default `20` |
 | `cocos_get_components` | Return bounded component summaries for a node. | `pageUrl?`; `uuid` |
@@ -123,7 +142,7 @@ All tool input objects are strict. Unknown fields are rejected. Inspection tools
 | `cocos_wait_for_property` | Poll one top-level property until it strictly equals a primitive value or the timeout passes. | `pageUrl?`; `uuid`; `componentType?` or `componentUuid?`; `key`; `equals`; `timeoutMs?` `100..30000`, default `5000`; `intervalMs?` `50..5000`, default `200` |
 | `cocos_highlight_node` | Draw a temporary pointer-transparent overlay around a UI node. | `pageUrl?`; `uuid`; `durationMs?` integer `100..10000`, default `2000` |
 
-`cocos_runtime_diagnostics` does not enable profiler/statistics systems. Render metrics are read from the values `Root` and the GFX device already update every frame (the same sources as `root.fps` and `device.numDrawCalls`), whether or not the profiler is shown; draw calls include the profiler overlay when it is visible. Generic invalid-reference checks still return `UNSUPPORTED_PUBLIC_API`. `cocos_highlight_node` temporarily mutates the page DOM only. It does not mutate the Cocos node/component graph or game state. `cocos_capture_node` clips only to the visible browser viewport, never falls back to full-page capture, bounds captures by the visible viewport and encoded response size rather than a fixed pixel cap, returns PNG (or JPEG fallback) base64 in-memory, downscales down to 0.25× (reported as `scale`) when JPEG quality steps are not enough, and rejects responses still oversized after that. Mutation results provide `before` values for manual inverse calls, but restoration cannot undo lifecycle callbacks or other runtime side effects. `cocos_step_frame` uses the public `cc.game.step` (fixed `game.frameTime` delta); because `director.tick` skips logic while the director is paused, it resumes the director only for the synchronous step call and pauses it again.
+`cocos_runtime_diagnostics` does not enable profiler/statistics systems. Render metrics are read from the values `Root` and the GFX device already update every frame (the same sources as `root.fps` and `device.numDrawCalls`), whether or not the profiler is shown; draw calls include the profiler overlay when it is visible. Generic invalid-reference checks still return `UNSUPPORTED_PUBLIC_API`. `cocos_highlight_node` temporarily mutates the page DOM only. It does not mutate the Cocos node/component graph or game state. `cocos_capture_node` clips only to the visible browser viewport, never falls back to full-page capture, bounds captures by the visible viewport and encoded response size rather than a fixed pixel cap, returns PNG (or JPEG fallback) base64 in-memory, downscales down to 0.25× (reported as `scale`) when JPEG quality steps are not enough, and rejects responses still oversized after that. Mutation results provide `before` values for manual inverse calls, but restoration cannot undo lifecycle callbacks or other runtime side effects. `cocos_step_frame` uses the public `cc.game.step` (fixed `game.frameTime` delta); because `director.tick` skips logic while the director is paused, it resumes the director only for the synchronous step call and pauses it again. `cocos_show_stats` is an explicit configuration change; while the overlay is visible, draw-call metrics include it. `cocos_emulate_device` holds a CDP session per page: emulation ends on `reset`, when the server disconnects, or when the server process exits, and `reset` also clears viewport overrides set by other CDP clients on that page. Cocos reads the user agent and touch support at startup, so pass `reload: true` for the game to see a new device class. Network throttling only delays traffic; it never reads requests or responses.
 
 ### Page selection
 
@@ -210,6 +229,8 @@ The test suite covers URL policy, CDP connection reuse and recovery, scene trave
 - Bounds/capture unavailable: select a visible UI node with `UITransform`. `INACTIVE` means the node or an ancestor is inactive. Capture is viewport-only, bounded, and never falls back to a full-page screenshot; `RESPONSE_LIMIT` means even a 0.25× JPEG exceeded the response budget, so capture a smaller node.
 - `cocos_snapshot_subtree` returns `RESPONSE_LIMIT` with a partial tree: snapshot a deeper node, or lower `maxDepth`.
 - `cocos_step_frame` returns `INVALID_MUTATION`: call `cocos_pause` first.
+- `doctor` reports HTTP 404 on the port: Chrome's built-in remote debugging holds it; see `CDP_UNAVAILABLE` above.
+- Game still behaves like desktop after `cocos_emulate_device`: call it again with `reload: true`; Cocos detects mobile and touch at startup.
 - Render metrics `fps` reads 0: the engine publishes FPS once per elapsed second, so read again after the scene has run for a second.
 
 ## Release and compatibility

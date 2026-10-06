@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
-import { captureNode, clickNode, inspectCocosPage, runBridge, type BridgeRequest } from './bridge.js';
+import { captureNode, clickNode, devicePresetNames, emulateDevice, inspectCocosPage, networkProfileNames, runBridge, type BridgeRequest } from './bridge.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 const pageUrl = z.url().optional();
@@ -210,6 +210,40 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
       inputSchema: z.object({ pageUrl, frames: z.number().int().min(1).max(60).optional() }).strict(),
       annotations: { ...runtimeMutation, idempotentHint: false },
     }, input => execute({ action: 'stepFrame', frames: input.frames }, input.pageUrl));
+
+    server.registerTool('cocos_show_stats', {
+      description: 'Show or hide the Cocos profiler overlay (FPS, draw calls, triangles) through the public profiler API.',
+      inputSchema: z.object({ pageUrl, visible: z.boolean() }).strict(),
+      annotations: runtimeMutation,
+    }, input => execute({ action: 'showStats', visible: input.visible }, input.pageUrl));
+
+    server.registerTool('cocos_emulate_device', {
+      description: 'Emulate a mobile device (viewport, DPR, touch, user agent, orientation) and optionally slow the CPU or network, like the Chrome device toolbar. Settings merge across calls and last until reset or server disconnect; reload lets the game re-detect touch and user agent.',
+      inputSchema: z.object({
+        pageUrl,
+        reset: z.boolean().optional(),
+        preset: z.enum(devicePresetNames).optional(),
+        width: z.number().int().min(200).max(4_000).optional(),
+        height: z.number().int().min(200).max(4_000).optional(),
+        deviceScaleFactor: z.number().min(1).max(4).optional(),
+        mobile: z.boolean().optional(),
+        orientation: z.enum(['portrait', 'landscape']).optional(),
+        cpuSlowdown: z.number().min(1).max(20).optional(),
+        network: z.enum(networkProfileNames).optional(),
+        reload: z.boolean().optional(),
+      }).strict()
+        .refine(value => (value.width === undefined) === (value.height === undefined), 'Provide width and height together')
+        .refine(value => !(value.preset && value.width !== undefined), 'Provide preset or width and height, not both')
+        .refine(value => value.width !== undefined || (value.deviceScaleFactor === undefined && value.mobile === undefined), 'deviceScaleFactor and mobile need width and height')
+        .refine(value => !value.reset || Object.keys(value).every(key => ['pageUrl', 'reset', 'reload'].includes(key)), 'reset accepts only pageUrl and reload'),
+      annotations: { ...runtimeMutation, idempotentHint: false },
+    }, async input => {
+      try {
+        return response(await emulateDevice(await browser.page(input.pageUrl), input));
+      } catch (error) {
+        return failure(error);
+      }
+    });
   }
 
   server.registerTool('cocos_highlight_node', {
