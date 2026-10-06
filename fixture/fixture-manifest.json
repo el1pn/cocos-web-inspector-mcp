@@ -50,6 +50,10 @@
         "property": "Canvas/Panel.InspectorFixture.details.password",
         "forbiddenValue": "must-not-be-returned"
       },
+      "destroyedReference": {
+        "property": "Canvas/Panel.InspectorFixture.staleNode",
+        "expected": { "$type": "Node", "destroyed": true }
+      },
       "getterSafety": {
         "property": "Canvas/Panel.InspectorFixture.mustNotRun",
         "mustInvoke": false,
