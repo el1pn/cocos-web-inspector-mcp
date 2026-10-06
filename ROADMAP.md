@@ -329,7 +329,7 @@ Debugger mode only. Emulate a mobile viewport like the Cocos preview device list
 
 Debugger mode only. Toggle the engine's FPS, draw-call, and triangle overlay through the public `profiler.showStats()` and `hideStats()` APIs. This is an explicit, opt-in configuration change, unlike the observational Phase 6 diagnostics.
 
-### Node picker
+### Node picker — Complete
 
 Let the user Alt+click the game canvas to select a node. A pointer-transparent overlay shows its name, path, and shortened UUID; `cocos_get_selection` returns the selection so the user can point instead of describing a node. The picker listener may only read the scene and draw its overlay.
 

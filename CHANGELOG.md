@@ -10,6 +10,7 @@ All notable changes are documented here.
 - `doctor` command: checks the CDP endpoint, port owner, localhost pages, Cocos detection, and active scene, with a fix for each failure.
 - `cocos_emulate_device` (debugger mode): device presets or custom viewport, DPR, touch, user agent, orientation, CPU slowdown, and network throttling, with `reset`.
 - `cocos_show_stats` (debugger mode): toggles the engine's FPS, draw-call, and triangle overlay.
+- `cocos_get_selection`: Alt+click a node on the game canvas to select it; the tool returns the node, its path, and the hit stack. The game never receives the Alt+click.
 
 ### Breaking
 
