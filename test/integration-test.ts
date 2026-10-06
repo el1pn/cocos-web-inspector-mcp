@@ -314,6 +314,16 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.equal(JSON.stringify(properties).includes('must-not-be-returned'), false);
     assert.equal(JSON.stringify(properties).includes('Property getter was invoked'), false);
 
+    assert.equal((await call(client, 'cocos_show_stats', { pageUrl, visible: false })).after.visible, false);
+    assert.deepEqual((await call(client, 'cocos_show_stats', { pageUrl, visible: true })).after, { visible: true });
+    assert.equal(await page.evaluate(() => (globalThis as any).cc.profiler.isShowingStats()), true);
+    const emulated = await call(client, 'cocos_emulate_device', { pageUrl, preset: 'iphone-14', orientation: 'landscape', cpuSlowdown: 2, network: 'offline' });
+    assert.deepEqual(emulated.after.device, { preset: 'iphone-14', width: 844, height: 390, deviceScaleFactor: 3, mobile: true, orientation: 'landscape' });
+    assert.deepEqual(await page.evaluate(() => [innerWidth, innerHeight, devicePixelRatio, navigator.maxTouchPoints, navigator.onLine, /iPhone/.test(navigator.userAgent)]), [844, 390, 3, 5, false, true]);
+    assert.deepEqual((await call(client, 'cocos_emulate_device', { pageUrl, reset: true })).after, {});
+    // Reset clears every metrics override on the page, including Playwright's own viewport, back to the window size.
+    assert.deepEqual(await page.evaluate(() => [innerWidth === 844, devicePixelRatio, navigator.maxTouchPoints, navigator.onLine, /iPhone/.test(navigator.userAgent)]), [false, 1, 0, true, false]);
+
     for (const viewport of [{ width: 1280, height: 720 }, { width: 640, height: 360 }]) {
       await page.setViewportSize(viewport);
       const highlighted = await call(client, 'cocos_highlight_node', { pageUrl, uuid: panelUuid, durationMs: 1_000 });

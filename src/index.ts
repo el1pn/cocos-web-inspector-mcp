@@ -24,6 +24,8 @@ function optionsFromArgs(args: string[]): { endpoint: string; allowRuntimeMutati
 }
 
 async function main(): Promise<void> {
+  const [command, ...rest] = process.argv.slice(2);
+  if (command === 'launch' || command === 'doctor') return (await import('./cli.js')).commands[command]!(rest);
   const options = optionsFromArgs(process.argv.slice(2));
   const browser = new BrowserConnection(options.endpoint);
   const server = createServer(browser, { allowRuntimeMutation: options.allowRuntimeMutation });
