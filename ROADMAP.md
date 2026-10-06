@@ -296,7 +296,7 @@ Before `1.0.0`:
 - Every tool has strict schemas and bounded output. (Done.)
 - Production/minified web builds are covered. (Cocos Creator 3.8.8 Web Mobile fixture verified.)
 - Windows and Linux CI run the complete local gate. (Done: `npm run check`.)
-- Node.js LTS versions supported by the package are tested. (Done: CI runs Node.js 20, 22, and 24 on Ubuntu and Windows.)
+- Node.js LTS versions supported by the package are tested. (Done: CI runs Node.js 22 and 24 on Ubuntu and Windows; Node.js 20 dropped after its April 2026 end of life.)
 - `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist. (Done.)
 - npm releases use a reviewed automated workflow and provenance where supported. (Done: reviewed `npm` environment, tag-only deploys, provenance.)
 
