@@ -166,6 +166,7 @@ test('production fixture checksum and live Cocos canaries pass', { timeout: 90_0
     assert.equal(properties.properties.count, 42);
     assert.equal(properties.properties.featureEnabled, true);
     assert.equal(properties.properties.details.category, 'manual-test');
+    assert.deepEqual(properties.properties.staleNode, { $type: 'Node', uuid: properties.properties.staleNode?.uuid, destroyed: true });
     assert.equal(JSON.stringify(properties).includes('must-not-be-returned'), false);
     assert.equal(JSON.stringify(properties).includes('Property getter was invoked'), false);
     assert.equal((await call(client, 'cocos_set_node_active', { pageUrl, uuid: panelUuid, active: false })).after.active, false);
@@ -292,6 +293,7 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.equal(properties.properties.count, 7);
     assert.equal(properties.properties.featureEnabled, true);
     assert.equal(properties.properties.details.category, 'manual-test');
+    assert.deepEqual(properties.properties.staleNode, { $type: 'Node', uuid: properties.properties.staleNode?.uuid, destroyed: true });
     const waited = await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', equals: 7, timeoutMs: 1_000 });
     assert.deepEqual(waited, { matched: true, key: 'count', value: 7, polls: 1 });
     assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', equals: 8, timeoutMs: 300 })).matched, false);

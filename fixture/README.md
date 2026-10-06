@@ -2,7 +2,7 @@
 
 Cocos Creator 3.8.8 project that produces the vendored web builds in `test/fixtures/` used by the integration tests.
 
-`assets/scenes/InspectorTest.scene` holds the canaries listed in `fixture-manifest.json`: the `InspectorFixture` component (public values, a redacted `details.password`, a throwing `mustNotRun` getter) and one each of Label, Button, Sprite, Toggle, and RichText.
+`assets/scenes/InspectorTest.scene` holds the canaries listed in `fixture-manifest.json`: the `InspectorFixture` component (public values, a redacted `details.password`, a throwing `mustNotRun` getter, a `staleNode` reference destroyed in `onLoad`) and one each of Label, Button, Sprite, Toggle, and RichText.
 
 ## Regenerate the scene
 

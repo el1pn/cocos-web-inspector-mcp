@@ -270,7 +270,7 @@ Mutation results should contain enough previous state for the client to request 
 
 Do not add a general `cocos_invoke_method` tool. Add narrowly scoped commands for validated use cases instead.
 
-## Phase 6 — Runtime diagnostics — Hierarchy and render metrics complete; invalid-reference detection not started
+## Phase 6 — Runtime diagnostics — Complete
 
 Add only metrics available through stable, public Cocos APIs:
 
@@ -279,7 +279,9 @@ Add only metrics available through stable, public Cocos APIs:
 - Bounded node and component counts.
 - Duplicate node names.
 - Maximum hierarchy depth.
-- Missing or invalid component references where reliably detectable.
+- References to destroyed nodes and components, read from the `_objFlags` Destroyed bit behind `isValid`. (Done.)
+
+Unassigned (`null`) properties, missing scripts, and deleted assets are not flagged: at runtime an intentional `null` is indistinguishable from a forgotten one, and deleted assets surface only in console output, which is out of scope.
 
 Diagnostics must remain observational. They must not silently enable profiling systems or modify game configuration.
 

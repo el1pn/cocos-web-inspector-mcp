@@ -4,6 +4,10 @@ All notable changes are documented here.
 
 ## Unreleased
 
+### Changed
+
+- `cocos_get_properties` marks references to destroyed nodes and components as `{ "$type", "uuid", "destroyed": true }` instead of reporting them as live. It reads the `_objFlags` bit behind `isValid` without invoking the getter.
+
 ## 1.0.0
 
 First stable release. Every Phase 7 release-readiness criterion in `ROADMAP.md` is met; the tool surface is unchanged from 0.1.9.

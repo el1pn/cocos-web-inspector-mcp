@@ -270,6 +270,24 @@ test('property serializer avoids getters, secrets, and cycles', () => withFakeCo
   assert.deepEqual(result.properties.engineComponent, { $type: 'Component', uuid: 'engine-comp', type: 'EngineComponent' });
 }));
 
+test('property serializer flags destroyed references without isValid', () => withFakeCocos(() => {
+  const node = ((globalThis as any).cc.director.getScene()).children[0];
+  // Shape after CCObject._destroyImmediate: Destroyed flag set, _children/node nulled, _id kept.
+  class Node { _objFlags = 1; _id = 'dead-node'; _name = ''; _children = null; }
+  class Button { _objFlags = 1; _id = 'dead-button'; node = null; }
+  class Label { _objFlags = 4; _id = 'pending-label'; node = new Node(); }
+  for (const proto of [Node.prototype, Button.prototype, Label.prototype]) Object.defineProperty(proto, 'isValid', { get: () => { throw new Error('isValid ran'); } });
+  node.staleNode = new Node();
+  node.staleButton = new Button();
+  node.pendingLabel = new Label();
+  node.pendingLabel.node._objFlags = 0;
+  const result = inspectCocos({ action: 'getProperties', uuid: 'child-1', maxDepth: 3 }) as any;
+  assert.deepEqual(result.properties.staleNode, { $type: 'Node', uuid: 'dead-node', destroyed: true });
+  assert.deepEqual(result.properties.staleButton, { $type: 'Button', uuid: 'dead-button', destroyed: true });
+  // ToDestroy (1 << 2) is still valid until the end of the frame, matching isValid.
+  assert.equal(result.properties.pendingLabel.destroyed, undefined);
+}));
+
 test('snapshot stops at the byte budget and asset references collapse', () => withFakeCocos(() => {
   const cc = (globalThis as any).cc;
   const scene = cc.director.getScene();
