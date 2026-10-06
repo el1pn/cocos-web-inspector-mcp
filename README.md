@@ -16,7 +16,7 @@ By default it does not edit Cocos game state, launch browsers, expose browser ne
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22+
 - A Chromium browser started with remote debugging bound to loopback
 - A Cocos Creator 3.x web build served from loopback
 

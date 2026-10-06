@@ -2,6 +2,12 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Breaking
+
+- Requires Node.js 22 or later. Node.js 20 reached end of life in April 2026 and is no longer tested.
+
 ## 1.1.0
 
 ### Changed
