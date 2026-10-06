@@ -325,8 +325,29 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     const picked = (await call(client, 'cocos_get_selection', { pageUrl })).selection;
     // The earlier click unchecked the toggle, which deactivates Checkmark, so the pick skips it and lands on TestToggle.
     assert.equal(picked.node.uuid, toggle.uuid);
-    assert.deepEqual(picked.stack.slice(0, 2).map((item: { name: string }) => item.name), ['TestToggle', 'Panel']);
+    // Panel only lays out children, so it never counts as a pick target.
+    assert.deepEqual(picked.stack.map((item: { name: string }) => item.name), ['TestToggle']);
     assert.equal(await isChecked(), checkedBefore, 'Alt+click must not reach the game');
+    // Real games keep invisible full-screen blockers on top (opacity 0, or a container with no renderer); picks must look through them.
+    await page.evaluate(() => {
+      const { cc } = globalThis as any;
+      const canvas = cc.director.getScene().getChildByName('Canvas');
+      const holder = new cc.Node('Holder');
+      holder.layer = canvas.layer;
+      holder.addComponent('cc.UITransform').setContentSize(4_000, 4_000);
+      const blocker = new cc.Node('Blocker');
+      blocker.layer = canvas.layer;
+      blocker.addComponent('cc.UITransform').setContentSize(4_000, 4_000);
+      blocker.addComponent('cc.Sprite');
+      blocker.addComponent('cc.UIOpacity').opacity = 0;
+      holder.addChild(blocker);
+      canvas.addChild(holder);
+    });
+    await page.keyboard.down('Alt');
+    await page.mouse.click(mark.x + mark.width / 2, mark.y + mark.height / 2);
+    await page.keyboard.up('Alt');
+    assert.equal((await call(client, 'cocos_get_selection', { pageUrl })).selection.node.uuid, toggle.uuid);
+    await page.evaluate(() => (globalThis as any).cc.director.getScene().getChildByName('Canvas').getChildByName('Holder').destroy());
     assert.deepEqual(await call(client, 'cocos_get_selection', { pageUrl, disable: true }), { version, picker: false, selection: null });
 
     assert.equal((await call(client, 'cocos_show_stats', { pageUrl, visible: false })).after.visible, false);

@@ -77,12 +77,12 @@ const IOS_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebK
 const IPAD_UA = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 const androidUa = (model: string) => `Mozilla/5.0 (Linux; Android 14; ${model}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36`;
 export const devicePresets = {
-  'iphone-se': { width: 375, height: 667, deviceScaleFactor: 2, mobile: true, userAgent: IOS_UA },
-  'iphone-14': { width: 390, height: 844, deviceScaleFactor: 3, mobile: true, userAgent: IOS_UA },
-  'iphone-14-pro-max': { width: 430, height: 932, deviceScaleFactor: 3, mobile: true, userAgent: IOS_UA },
-  'pixel-7': { width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true, userAgent: androidUa('Pixel 7') },
-  'galaxy-s20': { width: 360, height: 800, deviceScaleFactor: 3, mobile: true, userAgent: androidUa('SM-G981B') },
-  'ipad-mini': { width: 768, height: 1024, deviceScaleFactor: 2, mobile: true, userAgent: IPAD_UA },
+  'iphone-se': { width: 375, height: 667, deviceScaleFactor: 2, mobile: true, userAgent: IOS_UA, platform: 'iPhone' },
+  'iphone-14': { width: 390, height: 844, deviceScaleFactor: 3, mobile: true, userAgent: IOS_UA, platform: 'iPhone' },
+  'iphone-14-pro-max': { width: 430, height: 932, deviceScaleFactor: 3, mobile: true, userAgent: IOS_UA, platform: 'iPhone' },
+  'pixel-7': { width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true, userAgent: androidUa('Pixel 7'), platform: 'Linux armv81' },
+  'galaxy-s20': { width: 360, height: 800, deviceScaleFactor: 3, mobile: true, userAgent: androidUa('SM-G981B'), platform: 'Linux armv81' },
+  'ipad-mini': { width: 768, height: 1024, deviceScaleFactor: 2, mobile: true, userAgent: IPAD_UA, platform: 'iPad' },
 } as const;
 export type DevicePreset = keyof typeof devicePresets;
 export const devicePresetNames = Object.keys(devicePresets) as [DevicePreset, ...DevicePreset[]];
@@ -110,7 +110,7 @@ export type EmulationRequest = {
   reload?: boolean | undefined;
 };
 type EmulationState = {
-  device?: { preset?: DevicePreset; width: number; height: number; deviceScaleFactor: number; mobile: boolean; orientation: 'portrait' | 'landscape'; userAgent?: string };
+  device?: { preset?: DevicePreset; width: number; height: number; deviceScaleFactor: number; mobile: boolean; orientation: 'portrait' | 'landscape'; userAgent?: string; platform?: string };
   cpuSlowdown?: number;
   network?: NetworkProfile;
 };
@@ -143,7 +143,7 @@ export async function emulateDevice(page: Page, request: EmulationRequest): Prom
   if (request.reload) await page.reload();
   const report = (state: EmulationState) => {
     if (!state.device) return state;
-    const { userAgent: _userAgent, ...device } = state.device;
+    const { userAgent: _userAgent, platform: _platform, ...device } = state.device;
     const landscape = device.orientation === 'landscape';
     return { ...state, device: { ...device, width: landscape ? device.height : device.width, height: landscape ? device.width : device.height } };
   };
@@ -166,7 +166,10 @@ async function applyEmulation(session: CDPSession, state: EmulationState): Promi
   await session.send('Emulation.setTouchEmulationEnabled', touch ? { enabled: true, maxTouchPoints: 5 } : { enabled: false });
   // Like the Chrome device toolbar: mouse input arrives as touch, which mobile Cocos builds listen for.
   await session.send('Emulation.setEmitTouchEventsForMouse', { enabled: touch, configuration: 'mobile' });
-  await session.send('Emulation.setUserAgentOverride', { userAgent: device?.userAgent ?? (await session.send('Browser.getVersion')).userAgent });
+  // Engines such as Cocos read navigator.platform too: a touch-enabled MacIntel counts as iPad, whatever the user agent says.
+  await session.send('Emulation.setUserAgentOverride', device?.userAgent
+    ? { userAgent: device.userAgent, platform: device.platform ?? '' }
+    : { userAgent: (await session.send('Browser.getVersion')).userAgent });
   await session.send('Emulation.setCPUThrottlingRate', { rate: state.cpuSlowdown ?? 1 });
   await session.send('Network.emulateNetworkConditions', networkProfiles[state.network ?? 'online']);
 }
@@ -472,8 +475,20 @@ export function inspectCocos(request: BridgeRequest): unknown {
   if (request.action === 'pickAt') {
     // Cocos draws 2D nodes in pre-order, so the last hit in traversal order is the topmost one.
     const hits: Array<{ node: any; path: string; viewport: any }> = [];
+    // Full-screen blockers often sit on top at opacity 0; read the backing field, never the computing getter.
+    const transparent = (node: any): boolean => {
+      for (let current = node, depth = 0; current && depth < 100; current = current.parent, depth++) {
+        const local = dataProperty(dataProperty(current, '_uiProps') ?? {}, '_localOpacity');
+        if (typeof local === 'number' && local <= 0) return true;
+      }
+      return false;
+    };
+    // Full-screen layout containers draw nothing; only nodes that render or take input can be what the user pointed at.
+    const Renderable = cc.internal?.Renderable2D;
+    const pickable = (node: any): boolean => components(node).some(component => typeof Renderable === 'function' && component instanceof Renderable
+      || /^(Sprite|Label|RichText|Graphics|Button|Toggle|EditBox|Slider)$/.test(componentName(component)));
     walk((node, path) => {
-      if (node === scene || node.activeInHierarchy === false) return;
+      if (node === scene || node.activeInHierarchy === false || !pickable(node) || transparent(node)) return;
       const bounds = nodeBounds(node);
       const box = bounds.available ? bounds.viewport : undefined;
       if (box && request.x >= box.x && request.x <= box.x + box.width && request.y >= box.y && request.y <= box.y + box.height) hits.push({ node, path, viewport: box });

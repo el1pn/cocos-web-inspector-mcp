@@ -2,6 +2,14 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Fixed
+
+- `cocos_get_selection` skips layout-only containers and nodes at zero opacity. On a real game, an invisible full-screen popup blocker had swallowed every pick.
+- `cocos_emulate_device` presets also set `navigator.platform`, so Cocos reports Android for Android presets instead of iOS (it treats a touch-enabled `MacIntel` platform as iPad).
+- `doctor` no longer suggests `launch --port` with a privileged port.
+
 ## 2.0.0
 
 ### Added
