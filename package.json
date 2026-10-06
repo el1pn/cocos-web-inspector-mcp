@@ -1,6 +1,6 @@
 {
   "name": "cocos-web-inspector-mcp",
-  "version": "0.1.9",
+  "version": "1.0.0",
   "description": "MCP server to inspect and debug Cocos Creator 3.x web builds in local Chromium over CDP",
   "license": "MIT",
   "repository": {

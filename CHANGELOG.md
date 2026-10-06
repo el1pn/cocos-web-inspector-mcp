@@ -4,6 +4,10 @@ All notable changes are documented here.
 
 ## Unreleased
 
+## 1.0.0
+
+First stable release. Every Phase 7 release-readiness criterion in `ROADMAP.md` is met; the tool surface is unchanged from 0.1.9.
+
 ### Changed
 
 - CI runs the live integration test against vendored Cocos Creator 3.7.4 and 3.8.3 fixtures in addition to 3.8.8.

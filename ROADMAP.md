@@ -22,7 +22,7 @@ Arbitrary JavaScript evaluation, remote CDP targets, cookies, storage, network d
 7. Never claim a general rollback guarantee; setters, lifecycle callbacks, and engine systems may produce side effects.
 8. Prefer specific debugger commands over arbitrary method invocation.
 
-## Phase 0 — Reliability baseline
+## Phase 0 — Reliability baseline — Complete
 
 ### Live Chromium and Cocos integration tests
 
@@ -283,17 +283,17 @@ Add only metrics available through stable, public Cocos APIs:
 
 Diagnostics must remain observational. They must not silently enable profiling systems or modify game configuration.
 
-## Phase 7 — Release readiness — CI/docs and compatibility matrix complete; 3.7.4–3.8.8 in CI, 3.6.3 verified manually (license forbids vendoring)
+## Phase 7 — Release readiness — Complete in 1.0.0; 3.7.4–3.8.8 in CI, 3.6.3 verified manually (license forbids vendoring)
 
 Before `1.0.0`:
 
-- Live integration tests pass on supported platforms.
+- Live integration tests pass on supported platforms. (Done: Ubuntu and Windows.)
 - The Cocos compatibility matrix is documented and verified. (Done: 3.7.4, 3.8.3, 3.8.8 debug and 3.8.8 production in CI; 3.6.3 manual.)
 - Inspector and debugger modes have separate, accurate MCP annotations. (Done: inspectors read-only; debugger tools mutate runtime state; `cocos_click_node` destructive and open-world.)
-- Every mutation requires startup-time opt-in.
-- Every tool has strict schemas and bounded output.
+- Every mutation requires startup-time opt-in. (Done: `--allow-runtime-mutation`.)
+- Every tool has strict schemas and bounded output. (Done.)
 - Production/minified web builds are covered. (Cocos Creator 3.8.8 Web Mobile fixture verified.)
-- Windows and Linux CI run the complete local gate.
+- Windows and Linux CI run the complete local gate. (Done: `npm run check`.)
 - Node.js LTS versions supported by the package are tested. (Done: CI runs Node.js 20, 22, and 24 on Ubuntu and Windows.)
 - `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist. (Done.)
 - npm releases use a reviewed automated workflow and provenance where supported. (Done: reviewed `npm` environment, tag-only deploys, provenance.)
