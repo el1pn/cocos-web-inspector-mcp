@@ -159,8 +159,19 @@ test('production fixture checksum and live Cocos canaries pass', { timeout: 90_0
     const panelUuid = panel.matches[0]?.uuid as string;
     assert.ok(panelUuid);
     const components = await call(client, 'cocos_get_components', { pageUrl, uuid: panelUuid });
+    // Release builds minify engine constructor names; component types must still read as Cocos class names.
+    assert.deepEqual(components.components.map((component: { type: string }) => component.type), ['UITransform', 'InspectorFixture']);
     const componentUuid = components.components[1]?.uuid as string;
     assert.ok(componentUuid);
+    const buttonUuid = (await call(client, 'cocos_find_node', { pageUrl, componentType: 'Button' })).matches[0]?.uuid as string;
+    assert.ok(buttonUuid, 'componentType search must match minified engine components');
+    const button = (await call(client, 'cocos_get_node_bounds', { pageUrl, uuid: buttonUuid })).viewport;
+    assert.equal((await call(client, 'cocos_get_selection', { pageUrl })).selection, null);
+    await page.keyboard.down('Alt');
+    await page.mouse.click(button.x + button.width / 2, button.y + button.height / 2);
+    await page.keyboard.up('Alt');
+    assert.equal((await call(client, 'cocos_get_selection', { pageUrl })).selection.node.uuid, buttonUuid);
+    assert.deepEqual((await call(client, 'cocos_show_stats', { pageUrl, visible: true })).after, { visible: true });
     const properties = await call(client, 'cocos_get_properties', { pageUrl, uuid: panelUuid, componentUuid, maxDepth: 3 });
     assert.equal(properties.properties.title, 'Inspector fixture');
     assert.equal(properties.properties.count, 42);

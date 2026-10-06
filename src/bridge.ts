@@ -233,8 +233,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
     return undefined;
   };
   const componentName = (component: any): string => {
-    // ponytail: constructor metadata is the compatibility ceiling; add explicit engine adapters if minified builds need more.
-    const name = dataProperty(component, 'constructor')?.name || dataProperty(component, '__classname__') || 'Component';
+    // Release builds minify constructor names ("e"); the registered __classname__ survives, so it wins.
+    const name = dataProperty(component, '__classname__') || dataProperty(component, 'constructor')?.name || 'Component';
     return String(name).replace(/^cc\./, '').slice(0, 120);
   };
   const components = (node: any): any[] => {

@@ -9,6 +9,7 @@ All notable changes are documented here.
 - `cocos_get_selection` skips layout-only containers and nodes at zero opacity. On a real game, an invisible full-screen popup blocker had swallowed every pick.
 - `cocos_emulate_device` presets also set `navigator.platform`, so Cocos reports Android for Android presets instead of iOS (it treats a touch-enabled `MacIntel` platform as iPad).
 - `doctor` no longer suggests `launch --port` with a privileged port.
+- Release (minified) builds: component types read from the registered Cocos class name instead of the minified constructor name, which had turned every engine component into `e`. This broke `componentType` search and properties lookup, and made `cocos_get_selection` treat Buttons and Labels as layout-only.
 
 ## 2.0.0
 
