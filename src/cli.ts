@@ -138,7 +138,7 @@ async function doctor(args: string[]): Promise<void> {
   const owner = listener(port);
   const httpEndpoint = url.origin.replace(/^ws/, 'http');
   const probed = await probe(httpEndpoint);
-  if (probed.status === 'down') fail('CDP_UNAVAILABLE', `nothing answers on port ${port} (${probed.message})`, `run: npx cocos-web-inspector-mcp launch <game-url> --port ${port}`);
+  if (probed.status === 'down') fail('CDP_UNAVAILABLE', `nothing answers on port ${port} (${probed.message})`, `run: npx cocos-web-inspector-mcp launch <game-url>${Number(port) >= 1_024 ? ` --port ${port}` : ''}`);
   else if (probed.status === 'http') fail('CDP_UNAVAILABLE', `port ${port} answers HTTP ${probed.code}${owner ? ` (${owner})` : ''}`, probed.code === 404 ? 'Chrome built-in remote debugging (chrome://inspect/#remote-debugging) holds this port; turn it off or launch on another --port' : 'stop the process holding this port or use another port');
   else pass(`${probed.browser} answers on port ${port}${owner ? ` (${owner})` : ''}`);
 
