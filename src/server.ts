@@ -246,6 +246,13 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
     });
   }
 
+  server.registerTool('cocos_get_selection', {
+    description: 'Return the node the user last Alt+clicked on the game canvas. The first call installs the picker; Alt+clicks are kept from the game, other input is untouched. disable removes the picker, overlay, and selection.',
+    inputSchema: z.object({ pageUrl, disable: z.boolean().optional() }).strict(),
+    // Installs a page-level listener and DOM overlay only; never touches the Cocos graph.
+    annotations: { ...readOnly, readOnlyHint: false },
+  }, input => execute({ action: 'selection', disable: input.disable }, input.pageUrl));
+
   server.registerTool('cocos_highlight_node', {
     description: 'Temporarily draw a pointer-transparent DOM overlay around one Cocos UI node.',
     inputSchema: z.object({ pageUrl, uuid: z.string().min(1), durationMs: z.number().int().min(100).max(10_000).optional() }).strict(),

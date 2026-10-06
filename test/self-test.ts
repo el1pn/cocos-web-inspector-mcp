@@ -430,6 +430,7 @@ test('MCP omits runtime mutation tools by default', async () => {
       'cocos_get_node',
       'cocos_get_node_bounds',
       'cocos_get_properties',
+      'cocos_get_selection',
       'cocos_highlight_node',
       'cocos_list_pages',
       'cocos_runtime_diagnostics',
@@ -445,7 +446,8 @@ test('MCP omits runtime mutation tools by default', async () => {
       idempotentHint: false,
       openWorldHint: false,
     });
-    assert.ok(tools.tools.filter(tool => tool !== highlight).every(tool => tool.annotations?.readOnlyHint === true));
+    assert.deepEqual(tools.tools.find(tool => tool.name === 'cocos_get_selection')?.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+    assert.ok(tools.tools.filter(tool => !['cocos_highlight_node', 'cocos_get_selection'].includes(tool.name)).every(tool => tool.annotations?.readOnlyHint === true));
     const invalid = await client.callTool({ name: 'cocos_get_components', arguments: { uuid: 'x', extra: true } });
     assert.equal(invalid.isError, true);
   } finally {
