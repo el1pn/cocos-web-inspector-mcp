@@ -17,7 +17,9 @@ export type BridgeRequest =
   | { action: 'pause' }
   | { action: 'resume' }
   | { action: 'stepFrame'; frames?: number | undefined }
-  | { action: 'showStats'; visible: boolean };
+  | { action: 'showStats'; visible: boolean }
+  | { action: 'selection'; disable?: boolean | undefined }
+  | { action: 'pickAt'; x: number; y: number };
 
 type Vector3 = { x: number; y: number; z: number };
 type Quaternion = { x: number; y: number; z: number; w: number };
@@ -191,6 +193,9 @@ export function inspectCocos(request: BridgeRequest): unknown {
     document?: Document;
     __cocosWebInspectorHighlightTimer?: ReturnType<typeof setTimeout>;
     __cocosWebInspectorOverlay?: HTMLElement | undefined;
+    __cocosWebInspectorPicker?: ((event: Event) => void) | undefined;
+    __cocosWebInspectorSelection?: unknown;
+    __cocosWebInspectorSelectionOverlay?: HTMLElement | undefined;
   };
   if (root.location) {
     const target = new URL(root.location.href);
@@ -461,6 +466,96 @@ export function inspectCocos(request: BridgeRequest): unknown {
       components: nodeComponents.slice(0, 200).map(component => ({ type: componentName(component), uuid: String(component.uuid ?? ''), enabled: component.enabled !== false })),
       truncated: directChildren.length > 200 || nodeComponents.length > 200,
       truncationReasons: directChildren.length > 200 || nodeComponents.length > 200 ? ['NODE_LIMIT'] : [],
+    };
+  }
+
+  if (request.action === 'pickAt') {
+    // Cocos draws 2D nodes in pre-order, so the last hit in traversal order is the topmost one.
+    const hits: Array<{ node: any; path: string; viewport: any }> = [];
+    walk((node, path) => {
+      if (node === scene || node.activeInHierarchy === false) return;
+      const bounds = nodeBounds(node);
+      const box = bounds.available ? bounds.viewport : undefined;
+      if (box && request.x >= box.x && request.x <= box.x + box.width && request.y >= box.y && request.y <= box.y + box.height) hits.push({ node, path, viewport: box });
+    });
+    const overlay = root.__cocosWebInspectorSelectionOverlay;
+    const top = hits.at(-1);
+    if (!top) {
+      overlay?.remove();
+      return { version, point: { x: request.x, y: request.y }, node: null };
+    }
+    const selection = {
+      point: { x: request.x, y: request.y },
+      node: { ...summary(top.node), path: top.path },
+      viewport: top.viewport,
+      // Parents and siblings under the point, topmost first, for when the pick lands on a child.
+      stack: hits.slice(-10).reverse().map(hit => ({ uuid: String(hit.node.uuid ?? ''), name: String(hit.node.name ?? '').slice(0, 500), path: hit.path })),
+    };
+    const document = root.document;
+    if (document?.body) {
+      let box = overlay;
+      if (!box?.isConnected) {
+        box = document.createElement('div');
+        box.appendChild(document.createElement('span'));
+        root.__cocosWebInspectorSelectionOverlay = box;
+        document.body.appendChild(box);
+      }
+      Object.assign(box.style, {
+        position: 'fixed', pointerEvents: 'none', zIndex: '2147483647', boxSizing: 'border-box',
+        border: '2px solid #ff9f1a', background: 'rgba(255, 159, 26, 0.15)',
+        left: `${top.viewport.x}px`, top: `${top.viewport.y}px`, width: `${top.viewport.width}px`, height: `${top.viewport.height}px`,
+      });
+      const label = box.firstElementChild as HTMLElement;
+      Object.assign(label.style, {
+        position: 'absolute', left: '0', bottom: '100%', maxWidth: '480px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        font: '12px/1.4 monospace', color: '#1a1a1a', background: '#ff9f1a', padding: '1px 4px',
+      });
+      label.textContent = `${selection.node.name} · ${selection.node.path.slice(0, 200)} · ${selection.node.uuid.slice(0, 8)}`;
+    }
+    return selection;
+  }
+
+  if (request.action === 'selection') {
+    const events = ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'touchstart', 'touchend'];
+    const installed = root.__cocosWebInspectorPicker;
+    if (request.disable) {
+      if (installed) for (const type of events) root.removeEventListener?.(type, installed, true);
+      root.__cocosWebInspectorPicker = undefined;
+      root.__cocosWebInspectorSelection = undefined;
+      root.__cocosWebInspectorSelectionOverlay?.remove();
+      root.__cocosWebInspectorSelectionOverlay = undefined;
+      return { version, picker: false, selection: null };
+    }
+    if (!installed && typeof root.addEventListener === 'function') {
+      const picker = (event: Event) => {
+        const pointer = event as MouseEvent;
+        const canvas = cc.game?.canvas ?? root.document?.querySelector('#GameCanvas');
+        if (!pointer.altKey || event.target !== canvas) return;
+        // Alt+click selects; the game must not also receive it as a tap.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (event.type !== 'pointerdown') return;
+        try {
+          // The named function expression is in scope inside the page, so the picker reruns the bridge with a fresh scene.
+          root.__cocosWebInspectorSelection = inspectCocos({ action: 'pickAt', x: pointer.clientX, y: pointer.clientY });
+        } catch (error) {
+          root.__cocosWebInspectorSelection = { error: String(error instanceof Error ? error.message : error).slice(0, 500) };
+        }
+      };
+      for (const type of events) root.addEventListener(type, picker, true);
+      root.__cocosWebInspectorPicker = picker;
+    }
+    const selection = root.__cocosWebInspectorSelection as { node?: { uuid?: string } | null } | undefined;
+    let stale = false;
+    if (selection?.node?.uuid) {
+      try { findByUuid(selection.node.uuid); } catch { stale = true; }
+    }
+    return {
+      version,
+      picker: true,
+      selection: selection ?? null,
+      ...(stale ? { stale: true } : {}),
+      ...(selection ? {} : { hint: 'Alt+click a node on the game canvas, then call again' }),
     };
   }
 

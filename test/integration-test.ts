@@ -314,6 +314,21 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.equal(JSON.stringify(properties).includes('must-not-be-returned'), false);
     assert.equal(JSON.stringify(properties).includes('Property getter was invoked'), false);
 
+    assert.equal((await call(client, 'cocos_get_selection', { pageUrl })).selection, null);
+    const checkmark = await display('/InspectorTest/Canvas/Panel/TestToggle/Checkmark', 'Sprite');
+    const mark = (await call(client, 'cocos_get_node_bounds', { pageUrl, uuid: checkmark.uuid })).viewport;
+    const isChecked = () => call(client, 'cocos_get_properties', { pageUrl, uuid: toggle.uuid, componentType: 'Toggle', maxDepth: 0 }).then(result => result.properties.isChecked);
+    const checkedBefore = await isChecked();
+    await page.keyboard.down('Alt');
+    await page.mouse.click(mark.x + mark.width / 2, mark.y + mark.height / 2);
+    await page.keyboard.up('Alt');
+    const picked = (await call(client, 'cocos_get_selection', { pageUrl })).selection;
+    // The earlier click unchecked the toggle, which deactivates Checkmark, so the pick skips it and lands on TestToggle.
+    assert.equal(picked.node.uuid, toggle.uuid);
+    assert.deepEqual(picked.stack.slice(0, 2).map((item: { name: string }) => item.name), ['TestToggle', 'Panel']);
+    assert.equal(await isChecked(), checkedBefore, 'Alt+click must not reach the game');
+    assert.deepEqual(await call(client, 'cocos_get_selection', { pageUrl, disable: true }), { version, picker: false, selection: null });
+
     assert.equal((await call(client, 'cocos_show_stats', { pageUrl, visible: false })).after.visible, false);
     assert.deepEqual((await call(client, 'cocos_show_stats', { pageUrl, visible: true })).after, { visible: true });
     assert.equal(await page.evaluate(() => (globalThis as any).cc.profiler.isShowingStats()), true);
