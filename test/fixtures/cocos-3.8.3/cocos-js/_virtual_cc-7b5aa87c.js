@@ -56422,7 +56422,7 @@ System.register([], (function (exports, module) {
               return initDecoderWASM(meshopt_wasm_factory, meshopt_wasm_url);
             });
           } else {
-            return module.import('./meshopt_decoder.asm-01e6996a.js').then(function (_ref2) {
+            return module.import('./meshopt_decoder.asm-f0b77afd.js').then(function (_ref2) {
               var meshopt_asm_factory = _ref2["default"];
               return initDecoderASM(meshopt_asm_factory);
             });
@@ -120742,13 +120742,13 @@ System.register([], (function (exports, module) {
         };
         return ensureWasmModuleReady().then(function () {
           if (shouldUseWasmModule$1()) {
-            return Promise.all([module.import('./bullet.release.wasm-a6cdf600.js'), module.import('./bullet.release.wasm-e702f478.js')]).then(function (_ref) {
+            return Promise.all([module.import('./bullet.release.wasm-f8f1db32.js'), module.import('./bullet.release.wasm-e702f478.js')]).then(function (_ref) {
               var bulletWasmFactory = _ref[0]["default"],
                 bulletWasmUrl = _ref[1]["default"];
               return initWASM(bulletWasmFactory, bulletWasmUrl);
             });
           } else {
-            return module.import('./bullet.release.asm-cfbf6dc3.js').then(function (_ref2) {
+            return module.import('./bullet.release.asm-268eba68.js').then(function (_ref2) {
               var bulletAsmFactory = _ref2["default"];
               return initASM(bulletAsmFactory);
             });
@@ -131020,7 +131020,7 @@ System.register([], (function (exports, module) {
         };
         return ensureWasmModuleReady().then(function () {
           if (shouldUseWasmModule()) {
-            return Promise.all([module.import('./spine.wasm-a389c456.js'), module.import('./spine-9a8528df.js')]).then(function (_ref) {
+            return Promise.all([module.import('./spine.wasm-9394e525.js'), module.import('./spine-9a8528df.js')]).then(function (_ref) {
               var wasmFactory = _ref[0]["default"],
                 spineWasmUrl = _ref[1]["default"];
               return initWasm(wasmFactory, spineWasmUrl);
