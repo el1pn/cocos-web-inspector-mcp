@@ -300,7 +300,7 @@ Before `1.0.0`:
 - `CHANGELOG.md`, `SECURITY.md`, troubleshooting, and release instructions exist. (Done.)
 - npm releases use a reviewed automated workflow and provenance where supported. (Done: reviewed `npm` environment, tag-only deploys, provenance.)
 
-## Phase 8 — User-facing tooling without an extension — In progress
+## Phase 8 — User-facing tooling without an extension — Complete in 2.0; batch-break analysis deferred
 
 Earlier phases serve agents. This phase serves the developer at the keyboard. Build on `playwright-core`, CDP sessions, and self-contained in-page JavaScript. Features may borrow ideas from other browser MCP servers such as chrome-devtools-mcp, but must not require them to be installed.
 
@@ -336,6 +336,8 @@ Let the user Alt+click the game canvas to select a node. A pointer-transparent o
 ### Batch-break analysis — Deferred
 
 List each 2D draw batch with the node that started it and the reason the previous batch broke: texture, material, stencil or mask, or layer. Optionally tint batches on the canvas.
+
+Real-game evidence so far: 22 draw calls for 53 nodes on a production login scene. Measure a heavier scene, such as a lobby, before starting.
 
 Batches clear every frame and `DrawBatch` keeps no node reference, so this needs a one-frame hook on `batcher2D.commitComp` read after `EVENT_AFTER_RENDER`, and private fields verified on every matrix version. Start only when a real project shows a draw-call problem; gate it behind debugger mode and remove the hook after the captured frame.
 
