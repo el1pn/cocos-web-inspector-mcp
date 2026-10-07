@@ -18,10 +18,19 @@ export type BridgeRequest =
   | { action: 'resume' }
   | { action: 'stepFrame'; frames?: number | undefined }
   | { action: 'showStats'; visible: boolean }
+  | { action: 'analyzeBatches'; limit?: number | undefined; tintMs?: number | undefined }
   | { action: 'selection'; disable?: boolean | undefined }
-  | { action: 'pickAt'; x: number; y: number };
+  | { action: 'pickAt'; x: number; y: number }
+  | { action: 'dynamicAtlas'; limit?: number | undefined }
+  | { action: 'explainClick'; uuid?: string | undefined; x?: number | undefined; y?: number | undefined }
+  | { action: 'listenerReport'; limit?: number | undefined }
+  | { action: 'timeScale'; scale?: number | undefined }
+  | { action: 'callMethod'; uuid: string; componentUuid?: string | undefined; method: string; args: MethodArgument[]; awaitMs?: number | undefined; maxDepth?: number | undefined }
+  | { action: 'assetReport'; type?: string | undefined; unusedOnly?: boolean | undefined; limit?: number | undefined };
 
 type Vector3 = { x: number; y: number; z: number };
+// JSON arguments (validated by the MCP schema) plus references the bridge resolves to live objects: {"$node": uuid}, {"$component": uuid}, {"$asset": uuid}.
+export type MethodArgument = unknown;
 type Quaternion = { x: number; y: number; z: number; w: number };
 type PropertyValue = boolean | number | string | { x: number; y: number; z?: number | undefined; w?: number | undefined } | { width: number; height: number } | { r: number; g: number; b: number; a?: number | undefined };
 
@@ -64,13 +73,68 @@ export async function captureNode(page: Page, uuid: string): Promise<unknown> {
   return { captured: false, reason: 'RESPONSE_LIMIT' };
 }
 
-export async function clickNode(page: Page, uuid: string): Promise<unknown> {
+async function nodeCenter(page: Page, uuid: string): Promise<{ x: number; y: number } | { reason: string }> {
   const result = await page.evaluate(inspectCocos, { action: 'getNodeBounds', uuid } satisfies BridgeRequest) as any;
-  if (!result.available || !result.visible) return { clicked: false, reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
+  if (!result.available || !result.visible) return { reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
   const clip = result.clippedViewport;
-  const point = { x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 };
-  await page.mouse.click(point.x, point.y);
+  return { x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 };
+}
+
+// Under touch emulation Chrome turns mouse input into touch and never acknowledges Playwright's mouse calls, so send touch directly.
+function pointer(page: Page) {
+  const emulation = emulations.get(page);
+  if (!emulation?.state.device?.mobile) return { down: async (x: number, y: number) => { await page.mouse.move(x, y); await page.mouse.down(); }, move: (x: number, y: number) => page.mouse.move(x, y), up: () => page.mouse.up() };
+  let last = { x: 0, y: 0 };
+  const touch = async (type: 'touchStart' | 'touchMove' | 'touchEnd', x = last.x, y = last.y) => {
+    last = { x, y };
+    await emulation.session.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] });
+  };
+  return { down: (x: number, y: number) => touch('touchStart', x, y), move: (x: number, y: number) => touch('touchMove', x, y), up: () => touch('touchEnd') };
+}
+
+export async function clickNode(page: Page, uuid: string): Promise<unknown> {
+  const point = await nodeCenter(page, uuid);
+  if ('reason' in point) return { clicked: false, reason: point.reason };
+  const input = pointer(page);
+  await input.down(point.x, point.y);
+  await input.up();
   return { clicked: true, target: { nodeUuid: uuid }, point, runtimeOnly: true };
+}
+
+// Real pointer input, so ScrollView, PageView, Slider, and custom touch handlers see a drag.
+export async function dragNode(page: Page, uuid: string, dx: number, dy: number, steps = 10, durationMs = 300): Promise<unknown> {
+  const from = await nodeCenter(page, uuid);
+  if ('reason' in from) return { dragged: false, reason: from.reason };
+  const to = { x: from.x + dx, y: from.y + dy };
+  const input = pointer(page);
+  await input.down(from.x, from.y);
+  for (let step = 1; step <= steps; step++) {
+    await new Promise(resolve => setTimeout(resolve, durationMs / steps));
+    await input.move(from.x + dx * step / steps, from.y + dy * step / steps);
+  }
+  await input.up();
+  return { dragged: true, target: { nodeUuid: uuid }, from, to, runtimeOnly: true };
+}
+
+// EditBox.string is an accessor and assigning it skips text-changed/editing events, so type into the DOM input the EditBox opens on tap.
+export async function typeText(page: Page, uuid: string, text: string, submit: boolean): Promise<unknown> {
+  const { components } = await runBridge(page, { action: 'getComponents', uuid }) as { components?: Array<{ type: string }> };
+  if (!components?.some(component => component.type === 'EditBox')) throw new Error('Component not found');
+  const clicked = await clickNode(page, uuid) as { clicked: boolean; reason?: string };
+  if (!clicked.clicked) return { typed: false, reason: clicked.reason };
+  const focused = await page.waitForFunction(() => {
+    const element = document.activeElement;
+    return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
+  }, undefined, { timeout: 2_000 }).then(() => true, () => false);
+  if (!focused) return { typed: false, reason: 'NOT_FOCUSED' };
+  await page.evaluate(() => (document.activeElement as HTMLInputElement).select());
+  if (text) await page.keyboard.insertText(text);
+  else await page.keyboard.press('Delete');
+  if (submit) await page.keyboard.press('Enter');
+  const { properties } = await runBridge(page, { action: 'getProperties', uuid, componentType: 'EditBox', maxDepth: 0 }) as { properties?: { string?: string } };
+  // get_properties drops the text of password boxes.
+  const after = typeof properties?.string === 'string' ? { string: properties.string } : { redacted: true };
+  return { typed: true, target: { nodeUuid: uuid }, length: text.length, submitted: submit, after, runtimeOnly: true };
 }
 
 const IOS_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
@@ -141,6 +205,14 @@ export async function emulateDevice(page: Page, request: EmulationRequest): Prom
     await applyEmulation(session, after);
   }
   if (request.reload) await page.reload();
+  // Cocos resizes its canvas a frame or more after the viewport changes; wait so the next bounds, click, or capture sees the new layout.
+  await page.waitForFunction(() => {
+    const canvas = document.querySelector('canvas');
+    if (!canvas) return true;
+    const rect = canvas.getBoundingClientRect();
+    return Math.round(rect.width) <= innerWidth && Math.round(rect.height) <= innerHeight && (Math.round(rect.width) === innerWidth || Math.round(rect.height) === innerHeight);
+  }, undefined, { timeout: 3_000 }).catch(() => undefined);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))).catch(() => undefined);
   const report = (state: EmulationState) => {
     if (!state.device) return state;
     const { userAgent: _userAgent, platform: _platform, ...device } = state.device;
@@ -199,6 +271,10 @@ export function inspectCocos(request: BridgeRequest): unknown {
     __cocosWebInspectorPicker?: ((event: Event) => void) | undefined;
     __cocosWebInspectorSelection?: unknown;
     __cocosWebInspectorSelectionOverlay?: HTMLElement | undefined;
+    __cocosWebInspectorBatchCapture?: boolean | undefined;
+    __cocosWebInspectorBatchOverlay?: HTMLElement | undefined;
+    __cocosWebInspectorBatchTimer?: ReturnType<typeof setTimeout>;
+    __cocosWebInspectorTimeScale?: { scale: number; original: (dt: number) => void; own: boolean } | undefined;
   };
   if (root.location) {
     const target = new URL(root.location.href);
@@ -623,15 +699,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
     };
   }
 
-  if (request.action === 'getProperties') {
-    const node = findByUuid(request.uuid);
-    const matches = request.componentType ? components(node).filter(component => componentName(component) === request.componentType) : [];
-    if (matches.length > 1) throw new Error('Ambiguous component type');
-    const selected = request.componentUuid
-      ? components(node).find(component => component?.uuid === request.componentUuid)
-      : request.componentType ? matches[0] : node;
-    if (!selected) throw new Error('Component not found');
-    const maxDepth = Math.min(Math.max(request.maxDepth ?? 3, 0), 6);
+  // Shared bounded serializer: no getters, no private or secret-like keys, references collapsed to summaries.
+  const createSerializer = (maxDepth: number) => {
     let propertyCount = 0;
     let skipped = 0;
     let redacted = 0;
@@ -708,6 +777,20 @@ export function inspectCocos(request: BridgeRequest): unknown {
       seen.delete(value);
       return output;
     };
+    return { serialize, truncate, stats: () => ({ truncated, truncationReasons: [...truncationReasons], propertyCount, skipped, redacted, returned }), count: (field: 'redacted' | 'returned', by = 1) => { if (field === 'redacted') redacted += by; else returned += by; } };
+  };
+
+  if (request.action === 'getProperties') {
+    const node = findByUuid(request.uuid);
+    const matches = request.componentType ? components(node).filter(component => componentName(component) === request.componentType) : [];
+    if (matches.length > 1) throw new Error('Ambiguous component type');
+    const selected = request.componentUuid
+      ? components(node).find(component => component?.uuid === request.componentUuid)
+      : request.componentType ? matches[0] : node;
+    if (!selected) throw new Error('Component not found');
+    const maxDepth = Math.min(Math.max(request.maxDepth ?? 3, 0), 6);
+    const serializer = createSerializer(maxDepth);
+    const { serialize, truncate } = serializer;
     // ponytail: fixed allowlist of display backing fields, read without getters; extend per component when smoke tests need more.
     const displayFields: Record<string, unknown> = {};
     const readDisplay = (type: string, key: string, backing: string) => {
@@ -722,6 +805,16 @@ export function inspectCocos(request: BridgeRequest): unknown {
     readDisplay('RichText', 'string', '_string');
     readDisplay('Button', 'interactable', '_interactable');
     readDisplay('Toggle', 'isChecked', '_isChecked');
+    // Builds that no scene EditBox pulls in leave cc.EditBox unexported, so match the registered class name.
+    if (selected !== node && componentName(selected) === 'EditBox') {
+      const text = dataProperty(selected, '_string');
+      // InputFlag.PASSWORD is 0; a password box holds the secret in plain text.
+      if (dataProperty(selected, '_inputFlag') === 0) serializer.count('redacted');
+      else if (typeof text === 'string') {
+        if (text.length > 2_000) truncate('STRING_LIMIT');
+        displayFields.string = text.slice(0, 2_000);
+      }
+    }
     if (selected === node) {
       for (const key of ['name', 'active', 'activeInHierarchy']) {
         const value = dataProperty(node, key) ?? dataProperty(node, `_${key}`);
@@ -736,20 +829,21 @@ export function inspectCocos(request: BridgeRequest): unknown {
     }
     const properties = serialize(selected, 0, false);
     Object.assign(properties, displayFields);
-    returned += Object.keys(displayFields).length;
+    serializer.count('returned', Object.keys(displayFields).length);
+    const stats = serializer.stats();
     return {
       version,
       node: summary(node),
       componentType: request.componentType ?? (selected === node ? undefined : componentName(selected)),
       componentUuid: selected === node ? undefined : String(selected.uuid ?? ''),
       properties,
-      truncated,
-      truncationReasons: [...truncationReasons],
-      propertyCount,
-      inspected: propertyCount,
-      skipped,
-      redacted,
-      returned,
+      truncated: stats.truncated,
+      truncationReasons: stats.truncationReasons,
+      propertyCount: stats.propertyCount,
+      inspected: stats.propertyCount,
+      skipped: stats.skipped,
+      redacted: stats.redacted,
+      returned: stats.returned,
     };
   }
 
@@ -802,6 +896,175 @@ export function inspectCocos(request: BridgeRequest): unknown {
     if (before !== request.visible) request.visible ? profiler.showStats() : profiler.hideStats();
     const after = Boolean(profiler.isShowingStats());
     return { changed: before !== after, target: {}, before: { visible: before }, after: { visible: after }, runtimeOnly: true };
+  }
+
+  if (request.action === 'analyzeBatches') {
+    const batcher = cc.director?.root?.batcher2D;
+    const director = cc.director;
+    if (!batcher || typeof batcher.commitComp !== 'function' || typeof director?.once !== 'function') invalidMutation('2D batcher is unavailable');
+    if (root.__cocosWebInspectorBatchCapture) invalidMutation('a batch capture is already running');
+    // Batches clear every frame and keep no node reference, so wrap the batcher's commit methods for one rendered frame.
+    // ponytail: reads private Batcher2D fields (_curr*, _middleware*, _emptyMaterial), verified on 3.7.4-3.8.8; recheck on new engine versions.
+    const limit = Math.min(Math.max(request.limit ?? 100, 1), 500);
+    const tintMs = request.tintMs;
+    const ENTER_LEVEL = 2;
+    const ENTER_LEVEL_INVERTED = 6;
+    const batches: Array<{ node: any; component: string; reason: string; components: number; members: any[] }> = [];
+    let componentCount = 0;
+    let lastReset = 'FIRST';
+    const state = () => ({
+      component: batcher._currComponent, material: batcher._currMaterial, textureHash: batcher._currTextureHash, layer: batcher._currLayer,
+      stage: batcher._currDepthStencilStateStage, middleware: batcher._currIsMiddleware, start: batcher._middlewareIndexStart, count: batcher._middlewareIndexCount,
+    });
+    const reasonFor = (before: ReturnType<typeof state>, after: ReturnType<typeof state>, stage: unknown): string =>
+      stage === ENTER_LEVEL || stage === ENTER_LEVEL_INVERTED ? 'MASK'
+        : before.stage !== after.stage ? 'STENCIL'
+          : before.material === batcher._emptyMaterial || !before.component ? lastReset
+            : before.textureHash !== after.textureHash ? 'TEXTURE'
+              : before.material !== after.material ? 'MATERIAL'
+                : before.layer !== after.layer ? 'LAYER'
+                  : 'BUFFER';
+    const record = (comp: any, reason: string) => {
+      batches.push({ node: comp?.node, component: componentName(comp), reason, components: 1, members: [comp?.node] });
+      lastReset = 'STATE_RESET';
+    };
+    const merge = (comp: any) => {
+      const batch = batches[batches.length - 1]!;
+      batch.components++;
+      if (batch.members.length < 200) batch.members.push(comp?.node);
+    };
+    const hooks: Record<string, (original: Function) => Function> = {
+      commitComp: original => function (this: any, comp: any, ...rest: unknown[]) {
+        const before = state();
+        const stage = comp?.stencilStage;
+        const result = original.call(this, comp, ...rest);
+        try {
+          const after = state();
+          componentCount++;
+          if (after.component === comp && before.component !== comp) record(comp, reasonFor(before, after, stage));
+          else if (batches.length) merge(comp);
+        } catch { /* bookkeeping must never break rendering */ }
+        return result;
+      },
+      commitMiddleware: original => function (this: any, comp: any, ...rest: any[]) {
+        const before = state();
+        const result = original.call(this, comp, ...rest);
+        try {
+          const after = state();
+          componentCount++;
+          const merged = before.middleware && after.start === before.start && after.count === before.count + Number(rest[2]);
+          if (!merged) record(comp, before.middleware && before.textureHash === after.textureHash && before.material?.hash === after.material?.hash ? 'MIDDLEWARE' : reasonFor(before, after, undefined));
+          else if (batches.length) merge(comp);
+        } catch { /* bookkeeping must never break rendering */ }
+        return result;
+      },
+      commitModel: original => function (this: any, comp: any, ...rest: unknown[]) {
+        // Graphics-based masks commit their stencil shape as a model.
+        const stage = comp?.stencilStage;
+        const result = original.call(this, comp, ...rest);
+        componentCount++;
+        record(comp, stage === ENTER_LEVEL || stage === ENTER_LEVEL_INVERTED ? 'MASK' : 'MODEL');
+        lastReset = 'AFTER_MODEL';
+        return result;
+      },
+      commitIA: original => function (this: any, comp: any, ...rest: unknown[]) {
+        const result = original.call(this, comp, ...rest);
+        componentCount++;
+        record(comp, 'CUSTOM_IA');
+        lastReset = 'AFTER_MODEL';
+        return result;
+      },
+    };
+    const saved = Object.keys(hooks).map(name => ({ name, own: Object.getOwnPropertyDescriptor(batcher, name) }));
+    const restore = () => {
+      for (const { name, own } of saved) own ? Object.defineProperty(batcher, name, own) : delete batcher[name];
+      root.__cocosWebInspectorBatchCapture = undefined;
+    };
+    const beforeDraw = cc.Director?.EVENT_BEFORE_DRAW ?? 'director_before_draw';
+    const afterDraw = cc.Director?.EVENT_AFTER_DRAW ?? 'director_after_draw';
+    root.__cocosWebInspectorBatchCapture = true;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        director.off(beforeDraw, start);
+        director.off(afterDraw, finish);
+        restore();
+        reject(new Error('Invalid mutation: no frame rendered within 3 s; resume the game loop'));
+      }, 3_000);
+      function start() {
+        for (const name of Object.keys(hooks)) if (typeof batcher[name] === 'function') batcher[name] = hooks[name]!(batcher[name]);
+      }
+      function finish() {
+        clearTimeout(timer);
+        restore();
+        const pathOf = (node: any) => {
+          const names: string[] = [];
+          for (let current = node, depth = 0; current && depth < 100; current = current.parent, depth++) names.unshift(String(current.name ?? '').slice(0, 200));
+          return `/${names.join('/')}`.slice(0, 2_000);
+        };
+        const reasons: Record<string, number> = {};
+        for (const batch of batches) reasons[batch.reason] = (reasons[batch.reason] ?? 0) + 1;
+        const device = dataProperty(dataProperty(director, '_root') ?? {}, '_device');
+        const drawCalls = device ? dataProperty(device, '_numDrawCalls') : undefined;
+        // Optional canvas tint: one color per batch over every node it draws, in a pointer-transparent DOM overlay.
+        const colors: string[] = [];
+        let tinted = 0;
+        const document = root.document;
+        if (tintMs && document?.body) {
+          root.__cocosWebInspectorBatchOverlay?.remove();
+          clearTimeout(root.__cocosWebInspectorBatchTimer);
+          const overlay = document.createElement('div');
+          Object.assign(overlay.style, { position: 'fixed', inset: '0', pointerEvents: 'none', zIndex: '2147483647' });
+          batches.slice(0, limit).forEach((batch, index) => {
+            const hue = Math.round(index * 137.508) % 360;
+            colors[index] = `hsl(${hue}, 90%, 55%)`;
+            batch.members.forEach((member, position) => {
+              if (tinted >= 1_000 || !member) return;
+              const bounds = nodeBounds(member);
+              if (!bounds.available || !bounds.visible) return;
+              const box = document.createElement('div');
+              Object.assign(box.style, {
+                position: 'absolute', boxSizing: 'border-box', border: `2px solid ${colors[index]}`, background: `hsla(${hue}, 90%, 55%, 0.25)`,
+                left: `${bounds.viewport.x}px`, top: `${bounds.viewport.y}px`, width: `${bounds.viewport.width}px`, height: `${bounds.viewport.height}px`,
+              });
+              if (position === 0) {
+                const label = document.createElement('span');
+                Object.assign(label.style, { position: 'absolute', left: '0', top: '0', font: '11px/1.3 monospace', color: '#111', background: colors[index], padding: '0 3px', whiteSpace: 'nowrap' });
+                label.textContent = `#${index} ${batch.reason}`;
+                box.appendChild(label);
+              }
+              overlay.appendChild(box);
+              tinted++;
+            });
+          });
+          document.body.appendChild(overlay);
+          root.__cocosWebInspectorBatchOverlay = overlay;
+          root.__cocosWebInspectorBatchTimer = setTimeout(() => {
+            overlay.remove();
+            if (root.__cocosWebInspectorBatchOverlay === overlay) root.__cocosWebInspectorBatchOverlay = undefined;
+          }, Math.min(Math.max(tintMs, 100), 30_000));
+        }
+        resolve({
+          version,
+          batchCount: batches.length,
+          componentCount,
+          ...(typeof drawCalls === 'number' ? { drawCalls } : {}),
+          reasons,
+          batches: batches.slice(0, limit).map((batch, index) => ({
+            index,
+            node: { uuid: String(batch.node?.uuid ?? ''), name: String(batch.node?.name ?? '').slice(0, 500), path: pathOf(batch.node) },
+            component: batch.component,
+            reason: batch.reason,
+            components: batch.components,
+            ...(colors[index] ? { color: colors[index] } : {}),
+          })),
+          ...(tintMs ? { tinted } : {}),
+          truncated: batches.length > limit,
+          truncationReasons: batches.length > limit ? ['NODE_LIMIT'] : [],
+        });
+      }
+      director.once(beforeDraw, start);
+      director.once(afterDraw, finish);
+    });
   }
 
   if (request.action === 'setNodeActive') {
@@ -865,6 +1128,447 @@ export function inspectCocos(request: BridgeRequest): unknown {
     } else invalidMutation('property value shape does not match');
     const after = safe(component[request.key]);
     return { changed: JSON.stringify(before) !== JSON.stringify(after), target: { nodeUuid: request.uuid, componentUuid: request.componentUuid }, before: { value: before }, after: { value: after }, runtimeOnly: true };
+  }
+
+  // Asset helpers read backing fields only; refCount, width, and texture getters stay untouched.
+  const assetName = (asset: any) => String(dataProperty(asset, '_name') ?? '').slice(0, 500);
+  const assetUuid = (asset: any) => String(dataProperty(asset, '_uuid') ?? '');
+  const gfxBytes = (texture: any): number | undefined => {
+    const gfx = texture && typeof texture === 'object' ? dataProperty(texture, '_gfxTexture') : undefined;
+    const size = gfx && typeof gfx === 'object' ? dataProperty(gfx, '_size') : undefined;
+    return typeof size === 'number' && Number.isFinite(size) ? size : undefined;
+  };
+  // Every renderer in the scene, with the assets it points at; packed frames keep their own texture under _original.
+  const sceneAssetUsers = (): { users: Map<string, string[]>; textureOwners: Map<any, string>; truncated: boolean } => {
+    const users = new Map<string, string[]>();
+    const textureOwners = new Map<any, string>();
+    const add = (asset: any, path: string) => {
+      const uuid = asset && typeof asset === 'object' ? assetUuid(asset) : '';
+      if (!uuid) return;
+      const list = users.get(uuid) ?? [];
+      if (list.length < 5) list.push(path);
+      users.set(uuid, list);
+    };
+    const addFrame = (frame: any, path: string) => {
+      if (!frame || typeof frame !== 'object') return;
+      add(frame, path);
+      const texture = dataProperty(dataProperty(frame, '_original') ?? {}, '_texture') ?? dataProperty(frame, '_texture');
+      add(texture, path);
+      if (texture && typeof texture === 'object' && !textureOwners.has(texture)) textureOwners.set(texture, path);
+    };
+    const traversal = walk((node, path) => {
+      // Instantiated prefabs keep their source asset on every node's PrefabInfo.
+      add(dataProperty(dataProperty(node, '_prefab') ?? {}, 'asset'), path);
+      for (const component of components(node)) {
+        addFrame(dataProperty(component, '_spriteFrame'), path);
+        addFrame(dataProperty(component, '_ttfSpriteFrame'), path);
+        add(dataProperty(component, '_font'), path);
+        for (const material of [...(dataProperty(component, '_materials') ?? []), dataProperty(component, '_customMaterial')]) add(material, path);
+        add(dataProperty(component, '_skeletonData'), path);
+        add(dataProperty(component, '_clip'), path);
+        for (const clip of dataProperty(component, '_clips') ?? []) add(clip, path);
+      }
+    });
+    return { users, textureOwners, truncated: traversal.truncated };
+  };
+
+  if (request.action === 'callMethod') {
+    const node = findByUuid(request.uuid);
+    const target = request.componentUuid ? componentByUuid(node, request.componentUuid) : node;
+    const name = request.method;
+    // Engine and game internals, constructors, and prototype plumbing are not callable; secret-like names stay hidden like properties.
+    if (name.startsWith('_') || isSensitiveKey(name) || ['constructor', 'destroy', '__proto__', 'prototype', 'toString', 'valueOf'].includes(name)) invalidMutation(`method ${name} is not callable`);
+    let owner: any = target;
+    let descriptor: PropertyDescriptor | undefined;
+    for (let depth = 0; owner && owner !== Object.prototype && depth < 20 && !descriptor; depth++, owner = Object.getPrototypeOf(owner)) descriptor = Object.getOwnPropertyDescriptor(owner, name);
+    if (!descriptor || typeof descriptor.value !== 'function') return invalidMutation(`${name} is not a method of ${target === node ? 'Node' : componentName(target)}`);
+    const resolve = (value: any, depth = 0): any => {
+      if (depth > 10) invalidMutation('argument nesting is too deep');
+      if (Array.isArray(value)) return value.map(item => resolve(item, depth + 1));
+      if (!value || typeof value !== 'object') return value;
+      const keys = Object.keys(value);
+      if (keys.length === 1 && typeof value.$node === 'string') return findByUuid(value.$node);
+      if (keys.length === 1 && typeof value.$path === 'string') {
+        const found: any[] = [];
+        walk((candidate, path) => { if (path === value.$path) found.push(candidate); return found.length > 1 ? false : undefined; });
+        if (found.length !== 1) invalidMutation(found.length ? `path ${value.$path} matches several nodes` : `no node at ${value.$path}`);
+        return found[0];
+      }
+      if (keys.length === 1 && typeof value.$component === 'string') {
+        let found: any;
+        walk(candidate => { found = components(candidate).find(component => component?.uuid === value.$component); return found ? false : undefined; });
+        if (!found) throw new Error('Component not found');
+        return found;
+      }
+      if (keys.length === 1 && typeof value.$asset === 'string') {
+        const asset = cc.assetManager?.assets?.get?.(value.$asset);
+        if (!asset) invalidMutation(`asset ${value.$asset} is not loaded`);
+        return asset;
+      }
+      return Object.fromEntries(keys.map(key => [key, resolve(value[key], depth + 1)]));
+    };
+    const args = request.args.map(arg => resolve(arg));
+    const serializer = createSerializer(Math.min(Math.max(request.maxDepth ?? 2, 0), 6));
+    const describe = (value: unknown) => value === undefined ? { type: 'undefined' } : { value: serializer.serialize(value, 0) ?? null };
+    const report = (outcome: Record<string, unknown>) => ({ called: true, target: { nodeUuid: request.uuid, ...(request.componentUuid ? { componentUuid: request.componentUuid } : {}) }, method: name, ...outcome, serialization: serializer.stats(), runtimeOnly: true });
+    let result: any;
+    try {
+      result = descriptor.value.apply(target, args);
+    } catch (error) {
+      return report({ threw: { name: String((error as Error)?.name ?? 'Error').slice(0, 200), message: String((error as Error)?.message ?? error).slice(0, 2_000) } });
+    }
+    if (!result || typeof result.then !== 'function' || !request.awaitMs) return report({ result: describe(result), ...(result && typeof result.then === 'function' ? { pending: true } : {}) });
+    return Promise.race([
+      Promise.resolve(result).then(value => report({ result: describe(value), awaited: true }), error => report({ awaited: true, threw: { name: String(error?.name ?? 'Error').slice(0, 200), message: String(error?.message ?? error).slice(0, 2_000) } })),
+      new Promise(resolve => setTimeout(() => resolve(report({ pending: true, timedOut: true })), request.awaitMs)),
+    ]);
+  }
+
+  // CCObject._objFlags bit 0 is Destroyed (isValid reads it). A node outside the scene is only detached: pooled nodes are, legitimately.
+  const deadState = (value: any): 'destroyed' | 'detached' | undefined => {
+    if (!value || typeof value !== 'object') return undefined;
+    const flags = dataProperty(value, '_objFlags');
+    // Destroyed = 1 << 0; ToDestroy = 1 << 2 is set by destroy() until the end of the frame.
+    if (typeof flags === 'number' && flags & 5) return 'destroyed';
+    const owner = dataProperty(value, 'node') ?? value;
+    if (owner && typeof owner === 'object' && typeof cc.Node === 'function' && owner instanceof cc.Node) {
+      const ownerFlags = dataProperty(owner, '_objFlags');
+      if (typeof ownerFlags === 'number' && ownerFlags & 5) return 'destroyed';
+      let top = owner;
+      for (let depth = 0; top?.parent && depth < 200; depth++) top = top.parent;
+      if (top !== scene && !(cc.director?.isPersistRootNode?.(top))) return 'detached';
+    }
+    return undefined;
+  };
+  const describeTarget = (value: any): Record<string, unknown> => {
+    if (!value || typeof value !== 'object') return { type: typeof value };
+    const node = typeof cc.Node === 'function' && value instanceof cc.Node ? value : dataProperty(value, 'node');
+    const flags = dataProperty(value, '_objFlags');
+    return {
+      type: node === value ? 'Node' : componentName(value),
+      ...(node && typeof node === 'object' ? { node: String(dataProperty(node, '_name') ?? '').slice(0, 200), nodeUuid: String(dataProperty(node, '_id') ?? '') } : {}),
+      ...(typeof flags === 'number' && flags & 5 ? { destroyed: true } : {}),
+    };
+  };
+
+  if (request.action === 'explainClick') {
+    // Mirrors PointerEventDispatcher: processors sorted by camera priority, then hierarchy; the first whose UITransform.hitTest
+    // passes claims the touch, and every later one never sees it. Reads state only; dispatches nothing.
+    const target = request.uuid ? findByUuid(request.uuid) : undefined;
+    let point = request.x !== undefined && request.y !== undefined ? { x: request.x, y: request.y } : undefined;
+    const reasons: string[] = [];
+    if (target) {
+      const bounds = nodeBounds(target);
+      if (!bounds.available) reasons.push(bounds.reason);
+      else if (!point) point = { x: bounds.clippedViewport.x + bounds.clippedViewport.width / 2, y: bounds.clippedViewport.y + bounds.clippedViewport.height / 2 };
+      if (target.activeInHierarchy === false) reasons.push('INACTIVE');
+      if (bounds.available && bounds.outsideViewport) reasons.push('OUTSIDE_VIEWPORT');
+      const size = dataProperty(components(target).find(component => componentName(component) === 'UITransform') ?? {}, '_contentSize');
+      if (size && (Number(size.width) === 0 || Number(size.height) === 0)) reasons.push('ZERO_SIZE');
+      const button = components(target).find(component => componentName(component) === 'Button');
+      if (button && dataProperty(button, '_interactable') === false) reasons.push('BUTTON_NOT_INTERACTABLE');
+      if (button && dataProperty(button, '_enabled') === false) reasons.push('BUTTON_DISABLED');
+      const processor = dataProperty(target, '_eventProcessor');
+      const listens = !!processor && (dataProperty(processor, 'shouldHandleEventTouch') === true || dataProperty(processor, 'shouldHandleEventMouse') === true);
+      if (!listens && !button) reasons.push('NO_TOUCH_LISTENER');
+    }
+    if (!point) return { version, ...(target ? { target: { ...summary(target) } } : {}), clickable: false, reasons: reasons.length ? reasons : ['NO_POINT'] };
+    const canvas = cc.game?.canvas ?? root.document?.querySelector('#GameCanvas');
+    if (typeof HTMLCanvasElement === 'undefined' || !(canvas instanceof HTMLCanvasElement)) return { version, clickable: false, reasons: [...reasons, 'NO_CANVAS'] };
+    const rect = canvas.getBoundingClientRect();
+    // Same conversion as the web touch input: canvas-relative, y up, scaled by the engine's device pixel ratio.
+    const dpr = Number(cc.screen?.devicePixelRatio ?? root.devicePixelRatio ?? 1);
+    const screenPoint = cc.Vec2 ? new cc.Vec2((point.x - rect.left) * dpr, (rect.top + rect.height - point.y) * dpr) : undefined;
+    // The global cc namespace does not expose the input singleton, so rebuild the dispatcher's order from the scene:
+    // higher camera priority first, then reverse pre-order (later siblings and descendants before what they cover).
+    const candidates: Array<{ node: any; order: number; camera: number }> = [];
+    let order = 0;
+    walk(node => {
+      order++;
+      const processor = dataProperty(node, '_eventProcessor');
+      if (!processor || dataProperty(processor, '_isEnabled') !== true || dataProperty(processor, 'shouldHandleEventTouch') !== true || node.activeInHierarchy === false) return;
+      // cachedCameraPriority is refreshed only on real dispatch, so ask the batcher, as UITransform.cameraPriority does.
+      let camera = 0;
+      try { camera = Number(cc.director?.root?.batcher2D?.getFirstRenderCamera?.(node)?.priority ?? 0); } catch { camera = 0; }
+      candidates.push({ node, order, camera });
+    });
+    const sorted = candidates.sort((a, b) => b.camera - a.camera || b.order - a.order).map(candidate => candidate.node);
+    const hits: Array<Record<string, unknown>> = [];
+    let claimer: any;
+    for (const node of sorted) {
+      const transform = components(node).find(component => componentName(component) === 'UITransform');
+      let hit = false;
+      // hitTest is the engine's own public query: matrix math and Mask checks, no state change.
+      try { hit = !!screenPoint && typeof transform?.hitTest === 'function' && transform.hitTest(screenPoint, 0); } catch { hit = false; }
+      if (!hit) continue;
+      const types = components(node).map(componentName);
+      hits.push({ uuid: String(node.uuid ?? ''), name: String(node.name ?? '').slice(0, 200), components: types.slice(0, 20), ...(types.includes('BlockInputEvents') ? { blocksInput: true } : {}) });
+      if (!claimer) claimer = node;
+      if (hits.length >= 10) break;
+    }
+    if (target) {
+      // A claim by an ancestor still reaches the target only if the target itself was hit first; bubbling goes child to parent.
+      const targetHit = hits.findIndex(hit => hit.uuid === target.uuid);
+      if (claimer && claimer !== target) {
+        // Touch events bubble from the claiming node up to its ancestors, so the target still receives one claimed by a descendant.
+        let reaches = false;
+        for (let current = claimer.parent, depth = 0; current && depth < 200; current = current.parent, depth++) if (current === target) reaches = true;
+        if (!reaches) reasons.push(hits[0]?.blocksInput ? 'BLOCKED_BY_BLOCK_INPUT_EVENTS' : 'COVERED_BY_OTHER_NODE');
+      }
+      if (targetHit === -1 && !claimer && reasons.length === 0) reasons.push('HIT_TEST_FAILED');
+      // Inside a Mask whose shape excludes the point, hitTest fails though the box contains it.
+      if (targetHit === -1 && !reasons.length) reasons.push('MASKED_OR_OUTSIDE_HIT_AREA');
+    }
+    return {
+      version,
+      point,
+      ...(target ? { target: summary(target) } : {}),
+      claimedBy: claimer ? { uuid: String(claimer.uuid ?? ''), name: String(claimer.name ?? '').slice(0, 200), path: (() => { const names: string[] = []; for (let current = claimer, depth = 0; current && depth < 100; current = current.parent, depth++) names.unshift(String(current.name ?? '')); return `/${names.join('/')}`; })() } : null,
+      hitStack: hits,
+      clickable: target ? reasons.length === 0 : !!claimer,
+      reasons,
+    };
+  }
+
+  if (request.action === 'listenerReport') {
+    // ponytail: reads Scheduler._hashForTimers/_hashForUpdates, the tween system's actionMgr._hashTargets, and CallbacksInvoker._callbackTable, verified on 3.7.4-3.8.8.
+    // The engine purges callbacks whose target is a destroyed Cocos object (listeners on next emit, tweens next frame, component timers on destroy).
+    // It can never purge a callback whose target is not a Cocos object: an arrow function or bind(this) registered per popup open keeps
+    // the popup alive and runs again, so those are grouped by event and name; growth between two calls is the leak signal.
+    const limit = Math.min(Math.max(request.limit ?? 100, 1), 500);
+    const dead: Array<Record<string, unknown>> = [];
+    const unowned = new Map<string, { kind: string; event?: string; callback: string; targetType: string; count: number }>();
+    const counts: Record<string, { total: number; destroyed: number; detached: number; unowned: number }> = {};
+    const isCocosObject = (value: any) => !!value && typeof value === 'object' && typeof dataProperty(value, '_objFlags') === 'number';
+    const note = (kind: string, owner: any, detail: { event?: string; callback?: string; [key: string]: unknown }) => {
+      const bucket = counts[kind] ??= { total: 0, destroyed: 0, detached: 0, unowned: 0 };
+      bucket.total++;
+      if (!isCocosObject(owner)) {
+        bucket.unowned++;
+        const targetType = owner === undefined || owner === null ? 'none' : String(dataProperty(owner, 'constructor')?.name || typeof owner).slice(0, 80);
+        const callback = detail.callback ?? '';
+        const key = `${kind}|${detail.event ?? ''}|${callback}|${targetType}`;
+        const group = unowned.get(key) ?? { kind, ...(detail.event ? { event: detail.event } : {}), callback, targetType, count: 0 };
+        group.count++;
+        unowned.set(key, group);
+        return;
+      }
+      const state = deadState(owner);
+      if (!state) return;
+      bucket[state]++;
+      if (dead.length < limit) dead.push({ kind, state, ...detail, target: describeTarget(owner) });
+    };
+    const nameOf = (callback: any) => String(callback?.name || '(anonymous)').replace(/^bound /, 'bound:').slice(0, 120);
+    const scheduler = cc.director?.getScheduler?.() ?? dataProperty(cc.director ?? {}, '_scheduler');
+    for (const entry of Object.values(dataProperty(scheduler ?? {}, '_hashForTimers') ?? {}) as any[]) {
+      for (const timer of (entry?.timers ?? []) as any[]) note('schedule', entry?.target, { callback: nameOf(dataProperty(timer, '_callback')), interval: dataProperty(timer, '_interval') ?? null });
+    }
+    for (const entry of Object.values(dataProperty(scheduler ?? {}, '_hashForUpdates') ?? {}) as any[]) note('scheduleUpdate', entry?.target, { callback: 'update' });
+    // The tween system is not exported on cc; find it among the director's registered systems.
+    const systems = (dataProperty(cc.director ?? {}, '_systems') ?? []) as any[];
+    const tweens = dataProperty(dataProperty(systems.find(system => system && dataProperty(system, 'actionMgr')) ?? {}, 'actionMgr') ?? {}, '_hashTargets');
+    if (tweens instanceof Map) for (const [target, element] of tweens) note('tween', target, { callback: `${(element?.actions ?? []).length} action(s)` });
+    const emitters: Array<[string, any]> = [['director', cc.director], ['game', cc.game], ['view', cc.view], ['systemEvent', cc.systemEvent]];
+    for (const [emitter, value] of emitters) {
+      const table = value && typeof value === 'object' ? dataProperty(value, '_callbackTable') : undefined;
+      for (const [event, list] of Object.entries(table ?? {}) as Array<[string, any]>) {
+        for (const info of (list?.callbackInfos ?? []) as any[]) if (info) note(`${emitter}.on`, info.target, { event: event.slice(0, 120), callback: nameOf(info.callback) });
+      }
+    }
+    const groups = [...unowned.values()].sort((a, b) => b.count - a.count);
+    return {
+      version,
+      counts,
+      destroyedCount: Object.values(counts).reduce((sum, bucket) => sum + bucket.destroyed, 0),
+      detachedCount: Object.values(counts).reduce((sum, bucket) => sum + bucket.detached, 0),
+      unownedCount: Object.values(counts).reduce((sum, bucket) => sum + bucket.unowned, 0),
+      // Destroyed targets first; detached ones may be pooled nodes waiting for reuse.
+      dead: dead.sort((a, b) => Number(b.state === 'destroyed') - Number(a.state === 'destroyed')),
+      unowned: groups.slice(0, limit),
+      truncated: dead.length >= limit || groups.length > limit,
+      truncationReasons: dead.length >= limit || groups.length > limit ? ['NODE_LIMIT'] : [],
+    };
+  }
+
+  if (request.action === 'timeScale') {
+    // Scales the dt every director tick passes to components, systems (scheduler, tweens, animation, physics), and rendering.
+    const director = cc.director;
+    if (typeof director?.tick !== 'function') invalidMutation('director.tick is unavailable');
+    const current = root.__cocosWebInspectorTimeScale;
+    const before = current?.scale ?? 1;
+    if (request.scale !== undefined) {
+      if (!finite(request.scale) || request.scale <= 0 || request.scale > 100) invalidMutation('scale must be in (0, 100]');
+      if (request.scale === 1) {
+        // tick normally lives on the prototype: drop the own wrapper, or put back an own method that was there before.
+        if (current) {
+          if (current.own) director.tick = current.original;
+          else delete director.tick;
+          root.__cocosWebInspectorTimeScale = undefined;
+        }
+      } else if (current) current.scale = request.scale;
+      else {
+        const original = director.tick;
+        const state = { scale: request.scale, original, own: Object.prototype.hasOwnProperty.call(director, 'tick') };
+        root.__cocosWebInspectorTimeScale = state;
+        director.tick = function (this: any, dt: number) { return original.call(this, dt * state.scale); };
+      }
+    }
+    return { changed: before !== (root.__cocosWebInspectorTimeScale?.scale ?? 1), target: {}, before: { scale: before }, after: { scale: root.__cocosWebInspectorTimeScale?.scale ?? 1 }, runtimeOnly: true };
+  }
+
+  if (request.action === 'dynamicAtlas') {
+    const manager = cc.internal?.dynamicAtlasManager ?? cc.dynamicAtlasManager;
+    if (!manager || typeof manager !== 'object') return { version, available: false, reason: 'UNSUPPORTED_PUBLIC_API' };
+    // ponytail: reads private DynamicAtlasManager/Atlas fields verified on 3.7.4-3.8.8; recheck on new engine versions.
+    const limit = Math.min(Math.max(request.limit ?? 100, 1), 500);
+    const atlases = (dataProperty(manager, '_atlases') ?? []) as any[];
+    const config = {
+      enabled: dataProperty(manager, '_enabled') === true,
+      maxAtlasCount: dataProperty(manager, '_maxAtlasCount'),
+      textureSize: dataProperty(manager, '_textureSize'),
+      maxFrameSize: dataProperty(manager, '_maxFrameSize'),
+      textureBleeding: dataProperty(manager, '_textureBleeding'),
+    };
+    const owners = sceneAssetUsers().textureOwners;
+    let frameTotal = 0;
+    const report = atlases.slice(0, 20).map((atlas, index) => {
+      const width = Number(dataProperty(atlas, '_width') ?? 0);
+      const height = Number(dataProperty(atlas, '_height') ?? 0);
+      const infos = (dataProperty(atlas, '_innerTextureInfos') ?? {}) as Record<string, any>;
+      const frames = ((dataProperty(atlas, '_innerSpriteFrames') ?? []) as any[]).filter(Boolean);
+      frameTotal += frames.length;
+      let usedArea = 0;
+      const textures = Object.values(infos).map(info => {
+        const texture = info?.texture;
+        const w = Number(dataProperty(texture, '_width') ?? 0);
+        const h = Number(dataProperty(texture, '_height') ?? 0);
+        usedArea += w * h;
+        const owner = owners.get(texture);
+        return { name: assetName(texture), uuid: assetUuid(texture), ...(assetUuid(texture) ? {} : { runtime: true }), ...(owner ? { usedBy: owner } : {}), x: Number(info?.x ?? 0), y: Number(info?.y ?? 0), width: w, height: h };
+      });
+      const nextY = Number(dataProperty(atlas, '_nextY') ?? 0);
+      return {
+        index,
+        width, height,
+        textureCount: textures.length,
+        frameCount: frames.length,
+        fill: width * height > 0 ? Math.round(usedArea / (width * height) * 1_000) / 1_000 : 0,
+        shelfFill: height > 0 ? Math.round(Math.min(nextY / height, 1) * 1_000) / 1_000 : 0,
+        bytes: gfxBytes(dataProperty(atlas, '_texture')),
+        textures: textures.slice(0, limit),
+        truncated: textures.length > limit,
+      };
+    });
+    // Why visible sprites stayed out: the same checks insertSpriteFrame and SpriteFrame._checkPackable make.
+    const excluded: Record<string, number> = {};
+    const examples: Array<{ path: string; frame: string; reason: string }> = [];
+    let packed = 0;
+    walk((node, path) => {
+      if (node.activeInHierarchy === false) return;
+      for (const component of components(node)) {
+        const frame = dataProperty(component, '_spriteFrame');
+        if (!frame || typeof frame !== 'object') continue;
+        if (dataProperty(frame, '_original')) { packed++; continue; }
+        const texture = dataProperty(frame, '_texture');
+        const rect = dataProperty(frame, '_rect');
+        const sampler = texture ? dataProperty(texture, '_samplerInfo') : undefined;
+        // isCompressed is a pure format-range check on TextureBase; it reads only _format.
+        let compressed = false;
+        try { compressed = !!texture && texture.isCompressed === true; } catch { /* treat as uncompressed */ }
+        const reason = !config.enabled ? 'DISABLED'
+          : !texture || componentName(texture) === 'RenderTexture' ? 'NOT_TEXTURE2D'
+            : compressed ? 'COMPRESSED'
+              : rect && (Number(rect.width) > Number(config.maxFrameSize) || Number(rect.height) > Number(config.maxFrameSize)) ? 'TOO_LARGE'
+                : dataProperty(frame, '_packable') === false ? 'NOT_PACKABLE'
+                  : sampler && (sampler.minFilter !== 2 || sampler.magFilter !== 2 || sampler.mipFilter !== 0) ? 'FILTER'
+                    : atlases.length >= Number(config.maxAtlasCount) ? 'ATLAS_FULL'
+                      : 'NOT_YET_RENDERED';
+        excluded[reason] = (excluded[reason] ?? 0) + 1;
+        if (examples.length < limit) examples.push({ path, frame: assetName(frame), reason });
+      }
+    });
+    return { version, available: true, config, atlasCount: atlases.length, frameTotal, packedInScene: packed, atlases: report, excluded, excludedExamples: examples };
+  }
+
+  if (request.action === 'assetReport') {
+    const cache = cc.assetManager?.assets;
+    const map = cache && typeof cache === 'object' ? dataProperty(cache, '_map') : undefined;
+    if (!map || typeof map !== 'object') return { version, available: false, reason: 'UNSUPPORTED_PUBLIC_API' };
+    // ponytail: reads Cache._map, Asset._ref, and texture backing fields; one call is a snapshot, so leaks show as growth between two calls.
+    const limit = Math.min(Math.max(request.limit ?? 100, 1), 500);
+    const { users, truncated: sceneTruncated } = sceneAssetUsers();
+    // An asset is in use when a live renderer, the scene asset, or a persist-root node reaches it through the loaded dependency graph.
+    const depends = dataProperty(dataProperty(cc.assetManager, 'dependUtil') ?? {}, '_depends');
+    const dependMap = depends ? dataProperty(depends, '_map') ?? {} : {};
+    const reachable = new Map<string, string>();
+    const reach = (uuid: string, via: string) => {
+      const stack = [uuid];
+      while (stack.length && reachable.size < 100_000) {
+        const current = stack.pop()!;
+        if (reachable.has(current)) continue;
+        reachable.set(current, via);
+        const entry = dependMap[current];
+        for (const dep of entry?.deps ?? []) if (typeof dep === 'string') stack.push(dep);
+      }
+    };
+    for (const [uuid, paths] of users) reach(uuid, paths[0]!);
+    // builtinResMgr keeps engine defaults (default materials, textures, physics material) for the whole session.
+    const builtins = new Set<any>(Object.values(dataProperty(cc.builtinResMgr ?? {}, '_resources') ?? {}));
+    const sceneUuid = String(dataProperty(scene, '_id') ?? '');
+    if (sceneUuid) reach(sceneUuid, 'scene');
+    const persist = dataProperty(dataProperty(cc.assetManager, '_releaseManager') ?? cc.internal?.releaseManager ?? {}, '_persistNodeDeps');
+    for (const deps of Object.values((persist ? dataProperty(persist, '_map') : undefined) ?? {})) for (const dep of deps as string[]) reach(dep, 'persist-root');
+    const byType: Record<string, { count: number; bytes: number; unused: number }> = {};
+    const bundleOf = new Map<string, string>();
+    const bundles = dataProperty(dataProperty(cc.assetManager, 'bundles') ?? {}, '_map') ?? {};
+    for (const [name, bundle] of Object.entries(bundles as Record<string, any>)) {
+      const infos = dataProperty(dataProperty(dataProperty(bundle, '_config') ?? {}, 'assetInfos') ?? {}, '_map') ?? {};
+      for (const uuid of Object.keys(infos)) bundleOf.set(uuid, name);
+    }
+    const items: any[] = [];
+    let total = 0;
+    let totalBytes = 0;
+    for (const [key, asset] of Object.entries(map as Record<string, any>)) {
+      if (++total > 50_000) break;
+      if (!asset || typeof asset !== 'object') continue;
+      const type = componentName(asset);
+      const uuid = assetUuid(asset) || key;
+      const ref = Number(dataProperty(asset, '_ref') ?? 0);
+      const bytes = /Texture|RenderTexture/.test(type) ? gfxBytes(asset) : undefined;
+      const usedBy = users.get(uuid);
+      const bundle = bundleOf.get(uuid) ?? bundleOf.get(uuid.split('@')[0]!) ?? null;
+      // Engine built-ins live in the internal bundle or builtinResMgr for the whole session.
+      const status = usedBy ? 'used' : reachable.has(uuid) ? 'dependency' : bundle === 'internal' || builtins.has(asset) ? 'builtin' : 'unused';
+      const unused = status === 'unused';
+      const bucket = byType[type] ??= { count: 0, bytes: 0, unused: 0 };
+      bucket.count++;
+      if (bytes) { bucket.bytes += bytes; totalBytes += bytes; }
+      if (unused) bucket.unused++;
+      if (request.type && type !== request.type) continue;
+      if (request.unusedOnly && !unused) continue;
+      items.push({
+        type, name: assetName(asset), uuid, refCount: ref,
+        ...(bytes !== undefined ? { bytes } : {}),
+        ...(/Texture/.test(type) ? { width: Number(dataProperty(asset, '_width') ?? 0), height: Number(dataProperty(asset, '_height') ?? 0) } : {}),
+        bundle,
+        status,
+        ...(usedBy ? { usedBy } : status === 'dependency' ? { via: reachable.get(uuid) } : {}),
+      });
+    }
+    // Unused first, then by GPU bytes and refCount: the likeliest leaks lead.
+    items.sort((a, b) => Number(b.status === 'unused') - Number(a.status === 'unused') || (b.bytes ?? 0) - (a.bytes ?? 0) || b.refCount - a.refCount);
+    const memory = dataProperty(dataProperty(dataProperty(cc.director, '_root') ?? {}, '_device') ?? {}, '_memoryStatus');
+    return {
+      version,
+      assetCount: Math.min(total, 50_000),
+      textureBytes: totalBytes,
+      ...(memory ? { gpuMemory: { textureBytes: Number(dataProperty(memory, 'textureSize') ?? 0), bufferBytes: Number(dataProperty(memory, 'bufferSize') ?? 0) } } : {}),
+      byType,
+      assets: items.slice(0, limit),
+      matched: items.length,
+      truncated: items.length > limit || total > 50_000 || sceneTruncated,
+      truncationReasons: [...(items.length > limit || total > 50_000 ? ['NODE_LIMIT'] : []), ...(sceneTruncated ? ['NODE_LIMIT'] : [])].filter((value, index, all) => all.indexOf(value) === index),
+    };
   }
 
   if (request.action === 'getNodeBounds') return { version, uuid: request.uuid, ...nodeBounds(findByUuid(request.uuid)) };

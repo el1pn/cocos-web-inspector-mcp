@@ -2,6 +2,32 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Added
+
+- `cocos_type_text` (debugger mode): taps an EditBox and types with real keyboard input, so `text-changed` and editing events fire; `submit` presses Enter. Password boxes report `redacted`.
+- `cocos_drag_node` (debugger mode): drags from a node's center by `dx`/`dy` with real pointer input, for ScrollView, PageView, and Slider.
+- `cocos_analyze_batches` (debugger mode): captures one frame's 2D draw batches with the node that starts each and why the previous batch broke; `tintMs` overlays each batch's nodes on the canvas in its own color.
+- `cocos_dynamic_atlas`: reports dynamic atlas pages, packed textures with position and owner node, fill, GPU bytes, and why visible sprites were not packed.
+- `cocos_asset_report`: lists cached assets with refCount, bundle, texture GPU bytes, and used/dependency/builtin/unused status for leak hunting.
+- `cocos_explain_click`: explains why a tap does or does not reach a node by replaying the engine's touch dispatch order, without dispatching.
+- `cocos_listener_report`: reports timers, tweens, and global listeners that outlive their owner, including unowned callbacks grouped with counts for leak comparison.
+- `cocos_set_time_scale` (debugger mode): scales each frame's delta time to speed up or slow down the game.
+- Every single-node tool accepts `path` as an alternative to `uuid`; a path matching several nodes fails with `AMBIGUOUS_NODE` and the candidate UUIDs.
+- `--allow-method-call` flag registering `cocos_call_method`: calls one public node or component method with JSON or live-object arguments and returns the serialized result or thrown error; private, secret-like, `constructor`, and `destroy` members are refused.
+- `--allow-browser-data` flag registering `cocos_console_messages`, `cocos_network_requests`, `cocos_network_request`, and `cocos_storage`, with best-effort redaction of secret-like keys, auth and cookie headers, JWTs, bearer tokens, and all cookie values.
+- `cocos_get_properties` returns `EditBox.string`, except for password boxes.
+
+### Fixed
+
+- `cocos_emulate_device` returns after the canvas resizes, so a click right after it no longer reports `OUTSIDE_VIEWPORT`.
+- `cocos_click_node` no longer hangs under mobile touch emulation; it taps through CDP touch events instead of mouse events Chrome never acknowledges.
+
+### Changed
+
+- Supported range is Cocos Creator 3.7.4 through 3.8.8, the versions CI guards. 3.6.3 is no longer supported: its license forbids vendoring a build, so CI could not guard it, and the 2.0 tools never ran on it.
+
 ## 2.0.1
 
 ### Fixed
