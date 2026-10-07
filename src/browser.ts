@@ -13,9 +13,11 @@ export type InspectorErrorCode =
   | 'NODE_NOT_FOUND'
   | 'COMPONENT_NOT_FOUND'
   | 'AMBIGUOUS_COMPONENT'
+  | 'AMBIGUOUS_NODE'
   | 'MUTATION_DISABLED'
   | 'INVALID_MUTATION'
-  | 'OUTPUT_TRUNCATED';
+  | 'OUTPUT_TRUNCATED'
+  | 'REQUEST_NOT_FOUND';
 
 export class InspectorError extends Error {
   constructor(readonly code: InspectorErrorCode, message: string) {

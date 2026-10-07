@@ -36,6 +36,8 @@ The process is a stdio MCP server with one path from tool input to browser inspe
 3. `src/browser.ts` validates loopback-only CDP/page URLs, maintains a reusable Playwright CDP connection, and selects exactly one eligible page. Keep browser connection and target-selection policy here.
 4. `src/bridge.ts` runs `inspectCocos` through `page.evaluate`. It discovers the Cocos 3.x runtime, traverses the active scene, serializes bounded public data, and implements the temporary highlight overlay.
 
+`src/browser-data.ts` holds the opt-in console, network, and storage readers and their redaction; they use Playwright page APIs, not the in-page bridge.
+
 `src/cli.ts` holds the user-facing `launch` and `doctor` commands, loaded by `src/index.ts` only when the first argument names one. They reuse the browser and bridge modules; the MCP server path never launches a browser. Device emulation (`emulateDevice` in `src/bridge.ts`) runs over a per-page CDP session kept open for the life of the emulation, because Chrome drops overrides when that session detaches.
 
 `inspectCocos` crosses the Playwright serialization boundary. It must remain self-contained: do not reference module-level helpers, imported values, or Node-only APIs from inside it. `BridgeRequest` is the shared discriminated union between MCP registration and in-page dispatch.
@@ -47,7 +49,7 @@ This server intentionally has a narrow, read-only inspection surface. Preserve t
 - CDP endpoints allow only HTTP(S)/WS(S) loopback URLs; page targets allow only HTTP(S) loopback URLs.
 - Page selection requires an exact URL when multiple eligible pages exist.
 - Tool schemas are strict and reject unknown fields.
-- Do not add arbitrary evaluation, cookies, storage, network, console, or authorization-data tools.
+- Do not add arbitrary evaluation or cookie-value tools. `cocos_call_method` is the only general invocation tool: it registers only with `--allow-method-call`, refuses private, secret-like, `constructor`, and `destroy` members, and returns results through the shared serializer. Console, network, and storage tools live in `src/browser-data.ts`, register only with `--allow-browser-data`, and must redact before returning: secret-like keys, auth and cookie headers, JWTs, bearer tokens, and every cookie value.
 - Property serialization must not invoke getters. It skips private-prefixed and secret-like keys, functions, symbols, and cycles.
 - Traversal, properties, strings, highlight duration, and total encoded responses remain bounded. `runBridge` enforces the final 200,000-byte ceiling.
 - `cocos_highlight_node` may mutate only its temporary pointer-transparent DOM overlay, never the Cocos graph or game state.

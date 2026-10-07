@@ -4,6 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { sanitizeUrl, validateLocalUrl, BrowserConnection } from '../src/browser.js';
 import { captureNode, inspectCocos, runBridge } from '../src/bridge.js';
+import { redactBody, redactHeaders, redactText, redactUrl } from '../src/browser-data.js';
 import { createServer } from '../src/server.js';
 
 function fakeBrowser(pageUrl = 'http://localhost:3000') {
@@ -424,7 +425,10 @@ test('MCP omits runtime mutation tools by default', async () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     const tools = await client.listTools();
     assert.deepEqual(tools.tools.map(tool => tool.name).sort(), [
+      'cocos_asset_report',
       'cocos_capture_node',
+      'cocos_dynamic_atlas',
+      'cocos_explain_click',
       'cocos_find_node',
       'cocos_get_components',
       'cocos_get_node',
@@ -433,6 +437,7 @@ test('MCP omits runtime mutation tools by default', async () => {
       'cocos_get_selection',
       'cocos_highlight_node',
       'cocos_list_pages',
+      'cocos_listener_report',
       'cocos_runtime_diagnostics',
       'cocos_runtime_info',
       'cocos_scene_tree',
@@ -471,14 +476,72 @@ test('MCP exposes opted-in node active mutation with strict input', async () => 
         openWorldHint: false,
       });
     }
-    assert.deepEqual(tools.tools.find(tool => tool.name === 'cocos_click_node')?.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
+    for (const name of ['cocos_click_node', 'cocos_drag_node', 'cocos_type_text']) {
+      assert.deepEqual(tools.tools.find(tool => tool.name === name)?.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, name);
+    }
+    assert.equal(tools.tools.find(tool => tool.name === 'cocos_analyze_batches')?.annotations?.idempotentHint, false);
+    assert.equal((await client.callTool({ name: 'cocos_drag_node', arguments: { uuid: 'x', dx: 0, dy: 0 } })).isError, true);
+    assert.equal((await client.callTool({ name: 'cocos_type_text', arguments: { uuid: 'x', text: 'x'.repeat(2_001) } })).isError, true);
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_step_frame')?.annotations?.idempotentHint, false);
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_show_stats')?.annotations?.idempotentHint, true);
+    assert.equal(tools.tools.find(tool => tool.name === 'cocos_set_time_scale')?.annotations?.idempotentHint, true);
+    assert.equal((await client.callTool({ name: 'cocos_set_time_scale', arguments: { scale: 0 } })).isError, true);
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_emulate_device')?.annotations?.idempotentHint, false);
     const invalid = await client.callTool({ name: 'cocos_set_node_active', arguments: { uuid: 'x', active: true, extra: true } });
     assert.equal(invalid.isError, true);
     for (const args of [{ width: 400 }, { preset: 'iphone-14', width: 400, height: 800 }, { reset: true, preset: 'iphone-14' }, { mobile: true }, { cpuSlowdown: 50 }, { network: '2g' }]) {
       assert.equal((await client.callTool({ name: 'cocos_emulate_device', arguments: args })).isError, true, JSON.stringify(args));
+    }
+  } finally {
+    await Promise.allSettled([client.close(), server.close(), browser.close()]);
+  }
+});
+
+test('browser data redaction masks secrets in text, URLs, headers, and bodies', () => {
+  // Fake token, assembled at runtime so secret scanners do not flag the fixture.
+  const jwt = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjM0NTY3ODkwIn0', 'fake-signature-for-tests'].join('.');
+  assert.equal(redactText(`login ok ${jwt}`).includes(jwt), false);
+  assert.equal(redactText('Authorization: Bearer abcdef1234567890').includes('abcdef1234567890'), false);
+  assert.equal(redactText('sent Bearer abcdef1234567890 upstream'), 'sent Bearer [redacted] upstream');
+  assert.equal(redactText('token=abc123&mode=guest'), 'token=[redacted]&mode=guest');
+  assert.equal(redactText('{"password": "hunter2", "user": "bob"}'), '{"password": "[redacted]", "user": "bob"}');
+  assert.equal(redactUrl('http://u:p@127.0.0.1/api?access_token=xyz&page=2'), 'http://127.0.0.1/api?access_token=%5Bredacted%5D&page=2');
+  assert.deepEqual(redactHeaders({ Authorization: 'Bearer x', Cookie: 'sid=1', 'X-Api-Key': 'k', 'Content-Type': 'application/json' }), { Authorization: '[redacted]', Cookie: '[redacted]', 'X-Api-Key': '[redacted]', 'Content-Type': 'application/json' });
+  assert.equal(redactBody(JSON.stringify({ user: 'bob', password: 'hunter2', profile: { sessionToken: 't', level: 3 } })).body, JSON.stringify({ user: 'bob', password: '[redacted]', profile: { sessionToken: '[redacted]', level: 3 } }));
+  assert.equal(redactBody('username=bob&password=hunter2&otp=123456').body, 'username=bob&password=[redacted]&otp=[redacted]');
+  assert.equal(redactBody('x'.repeat(30_000)).truncated, true);
+  // Words that merely contain "pin" or "otp" are not secrets.
+  assert.equal(redactText('shipping=fast&footprint=2'), 'shipping=fast&footprint=2');
+});
+
+test('MCP registers browser data tools only with their own flag', async () => {
+  for (const [options, expected] of [[{ allowRuntimeMutation: true }, false], [{ allowBrowserData: true }, true]] as const) {
+    const browser = new BrowserConnection('http://127.0.0.1:9222');
+    const server = createServer(browser, options);
+    const client = new Client({ name: 'self-test', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const names = (await client.listTools()).tools.map(tool => tool.name);
+      for (const name of ['cocos_console_messages', 'cocos_network_requests', 'cocos_network_request', 'cocos_storage']) assert.equal(names.includes(name), expected, name);
+      assert.equal(names.includes('cocos_call_method'), false, 'method calls need their own flag');
+    } finally {
+      await Promise.allSettled([client.close(), server.close(), browser.close()]);
+    }
+  }
+});
+
+test('MCP registers cocos_call_method only with --allow-method-call', async () => {
+  const browser = new BrowserConnection('http://127.0.0.1:9222');
+  const server = createServer(browser, { allowMethodCall: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const tool = (await client.listTools()).tools.find(candidate => candidate.name === 'cocos_call_method');
+    assert.deepEqual(tool?.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
+    for (const args of [{ uuid: 'x', method: 'a.b' }, { uuid: 'x', method: 'f', args: Array(21).fill(0) }, { uuid: 'x', method: 'f', extra: 1 }]) {
+      assert.equal((await client.callTool({ name: 'cocos_call_method', arguments: args })).isError, true, JSON.stringify(args).slice(0, 80));
     }
   } finally {
     await Promise.allSettled([client.close(), server.close(), browser.close()]);

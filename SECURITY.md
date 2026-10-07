@@ -12,7 +12,9 @@ Do not include credentials, tokens, cookies, browser profiles, private game asse
 
 ## Scope
 
-The server intentionally limits CDP and page targets to loopback URLs, and never exposes arbitrary evaluation, browser storage, network payloads, console data, or authorization data. CDP remains powerful: use a disposable profile, bind debugging to loopback, and avoid sensitive accounts.
+The server intentionally limits CDP and page targets to loopback URLs and never exposes arbitrary evaluation or cookie values. Console messages, network requests and bodies, and storage are exposed only when the server starts with `--allow-browser-data`; their redaction (secret-like keys, authorization and cookie headers, JWTs, bearer tokens) is best effort, and a secret in free text that matches no pattern can be returned. A redaction miss under that flag is in scope for reports.
+
+`--allow-method-call` registers `cocos_call_method`, which runs any public method of a node or component in the attached game. That is game code execution: it can change state, reach servers, spend currency, or read data the method returns. Results pass through the property serializer (no getters, secret-like keys dropped), but a method can still return a secret under an innocuous name. Enable it only against a disposable profile and test accounts. CDP remains powerful: use a disposable profile, bind debugging to loopback, and avoid sensitive accounts.
 
 Redaction is key-based: properties whose names look like secrets are dropped, but string values are returned as-is, so a token embedded in a URL-valued property (for example a WebSocket `url` with a query token) is visible. `cocos_capture_node` returns pixels of whatever the game renders. `cocos_click_node` (runtime debugger mode only) runs the game's own handlers, which can reach real servers or make irreversible changes.
 
