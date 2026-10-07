@@ -368,8 +368,9 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.deepEqual(emulated.after.device, { preset: 'iphone-14', width: 844, height: 390, deviceScaleFactor: 3, mobile: true, orientation: 'landscape' });
     assert.deepEqual(await page.evaluate(() => [innerWidth, innerHeight, devicePixelRatio, navigator.maxTouchPoints, navigator.onLine, /iPhone/.test(navigator.userAgent)]), [844, 390, 3, 5, false, true]);
     assert.deepEqual((await call(client, 'cocos_emulate_device', { pageUrl, reset: true })).after, {});
-    // Reset clears every metrics override on the page, including Playwright's own viewport, back to the window size.
-    assert.deepEqual(await page.evaluate(() => [innerWidth === 844, devicePixelRatio, navigator.maxTouchPoints, navigator.onLine, /iPhone/.test(navigator.userAgent)]), [false, 1, 0, true, false]);
+    // Reset clears every metrics override on the page, including Playwright's own viewport, back to the window size; Chrome applies it asynchronously.
+    await page.waitForFunction(() => innerWidth !== 844, undefined, { timeout: 5_000 });
+    assert.deepEqual(await page.evaluate(() => [devicePixelRatio, navigator.maxTouchPoints, navigator.onLine, /iPhone/.test(navigator.userAgent)]), [1, 0, true, false]);
 
     for (const viewport of [{ width: 1280, height: 720 }, { width: 640, height: 360 }]) {
       await page.setViewportSize(viewport);
