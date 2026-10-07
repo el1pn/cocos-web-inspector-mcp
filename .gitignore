@@ -3,6 +3,3 @@ dist/
 coverage/
 *.log
 .claude/
-
-# Creator 3.6.3 engine license forbids redistribution; build it locally only
-/test/fixtures/cocos-3.6.3/
