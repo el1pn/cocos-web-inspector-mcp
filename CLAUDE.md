@@ -69,3 +69,7 @@ TypeScript uses `NodeNext`, strict mode, `noUncheckedIndexedAccess`, and `exactO
 3. Update the provenance notes beside each snapshot and run `npm run check`.
 
 Vendored Cocos builds are generated artifacts. Do not hand-edit them; rebuild with `fixture/build.sh` and record the fixture source commit in their provenance.
+
+## Public repository hygiene
+
+This repository and its npm package are public. Commit messages, PR titles and bodies, review comments, release notes, docs, and test names must not name private projects, companies, internal hosts or paths, or commit hashes and scene, node, or prefab names from other repositories. Describe real-game checks generically, for example "a production Cocos Creator 3.8.8 game, login scene, 53 nodes". Rewriting pushed history is irreversible and only partly effective, so check the text before pushing.

@@ -6,7 +6,7 @@ Security fixes target the latest published package version. Pre-release or local
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a suspected vulnerability. Contact the repository owner through GitHub private vulnerability reporting, if enabled, or the contact route listed on the repository profile. Include reproduction steps, affected version, impact, and any proposed mitigation.
+Do not open a public issue for a suspected vulnerability. Use GitHub private vulnerability reporting (Security tab, "Report a vulnerability"). Include reproduction steps, affected version, impact, and any proposed mitigation.
 
 Do not include credentials, tokens, cookies, browser profiles, private game assets, or customer data.
 
