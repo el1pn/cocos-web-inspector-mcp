@@ -3,9 +3,9 @@ import test from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { sanitizeUrl, validateLocalUrl, BrowserConnection } from '../src/browser.js';
-import { captureNode, inspectCocos, runBridge } from '../src/bridge.js';
+import { captureNode, fitsResponse, inspectCocos, runBridge } from '../src/bridge.js';
 import { redactBody, redactHeaders, redactText, redactUrl } from '../src/browser-data.js';
-import { NativeConnection, nativeNetworkRequest, nativeNetworkRequests, parseCocosLogcat } from '../src/native.js';
+import { inspectorPort, NativeConnection, nativeNetworkRequest, nativeNetworkRequests, parseCocosLogcat } from '../src/native.js';
 import { createServer } from '../src/server.js';
 
 function fakeBrowser(pageUrl = 'http://localhost:3000') {
@@ -636,20 +636,31 @@ test('asset report matches native assets whose uuid sits behind an accessor', ()
   }
 });
 
+test('native inspector port comes from the latest valid logcat line, or only the expected one on reconnect', () => {
+  const line = (port: number) => `D/Cocos: Debugger listening..., visit [ devtools://devtools/bundled/js_app.html?v8only=true&ws=127.0.0.1:${port}/00010002-0003-4004-8005-000600070008 ] in chrome browser to debug!`;
+  const logcat = [line(6086), line(43086), line(99999), line(80)].join('\n');
+  assert.equal(inspectorPort(logcat), 43086, 'out-of-range ports are ignored');
+  assert.equal(inspectorPort(logcat, 6086), 6086);
+  assert.equal(inspectorPort(logcat, 40000), undefined, 'a reconnect never switches to a port no line names');
+  assert.equal(inspectorPort(''), undefined);
+});
+
 test('native network capture records XHR and WebSocket traffic and keeps the game handlers working', async () => {
-  const listeners: Record<string, Array<() => void>> = {};
+  // Like the Cocos native binding: addEventListener assigns on*, and the engine calls only the on* property.
   class FakeXhr {
+    [key: string]: any;
     status = 0;
     responseType = '';
     responseText = '';
     open() {}
     setRequestHeader() {}
-    addEventListener(type: string, listener: () => void) { (listeners[type] ??= []).push(listener); }
+    addEventListener(type: string, listener: () => void) { this[`on${type}`] = listener; }
     getAllResponseHeaders() { return 'Date: Thu, 08 Oct 2026 09:16:11 GMT\r\nSet-Cookie: sid=secret'; }
-    send() { this.status = 200; this.responseText = '{"accessToken":"abc","ok":true}'; for (const listener of listeners.load ?? []) listener(); }
+    send() { this.status = 200; this.responseText = '{"accessToken":"abc","ok":true}'; this.onload?.(); }
   }
   const sent: unknown[] = [];
-  class FakeSocket { onmessage: unknown = null; send(data: unknown) { sent.push(data); } }
+  const socketArgs: unknown[][] = [];
+  class FakeSocket { onmessage: unknown = null; constructor(...args: unknown[]) { socketArgs.push(args); } send(data: unknown) { sent.push(data); } }
   const previous = { XMLHttpRequest: (globalThis as any).XMLHttpRequest, WebSocket: (globalThis as any).WebSocket };
   Object.assign(globalThis, { XMLHttpRequest: FakeXhr, WebSocket: FakeSocket });
   delete (globalThis as any).__cocosWebInspectorNetwork;
@@ -662,9 +673,13 @@ test('native network capture records XHR and WebSocket traffic and keeps the gam
       const xhr = new (globalThis as any).XMLHttpRequest();
       xhr.open('POST', 'https://api.example.test/login?token=t1');
       xhr.setRequestHeader('Authorization', 'Bearer abcdefghijkl');
+      let loaded = 0;
+      xhr.onload = () => { loaded++; };
       xhr.send('{"password":"p"}');
+      assert.equal(loaded, 1, 'the game onload set before send still runs');
       let received: unknown;
-      const socket = new (globalThis as any).WebSocket('wss://api.example.test/ws');
+      const socket = new (globalThis as any).WebSocket('wss://api.example.test/ws', [], 'cacert.pem');
+      assert.deepEqual(socketArgs, [['wss://api.example.test/ws', [], 'cacert.pem']], 'the CA file reaches the native socket');
       socket.onmessage = (event: { data: unknown }) => { received = event.data; };
       (socket.onmessage as (event: unknown) => void)({ data: 'hello' });
       socket.send('ping');
@@ -677,8 +692,15 @@ test('native network capture records XHR and WebSocket traffic and keeps the gam
       assert.equal(detail.responseHeaders.date, 'Thu, 08 Oct 2026 09:16:11 GMT');
       assert.equal(detail.responseHeaders['set-cookie'], '[redacted]');
       assert.match(detail.responseBody.body, /"accessToken":"\[redacted\]"/);
+      assert.equal((globalThis as any).__cocosWebInspectorNetwork.entries[0].requestHeaders.Authorization, '[redacted]', 'game memory never holds the raw credential header');
       const socketDetail = await nativeNetworkRequest(page, list.requests[1]!.id, true) as any;
       assert.deepEqual(socketDetail.frames.map((frame: { direction: string; data: string }) => [frame.direction, frame.data]), [['received', 'hello'], ['sent', 'ping']]);
+      // 50 frames of 2,000 three-byte characters plus large bodies exceed the 200 KB ceiling; the oldest frames go first.
+      for (let index = 0; index < 60; index++) socket.send('ễ'.repeat(2_000));
+      const bounded = await nativeNetworkRequest(page, list.requests[1]!.id, true) as any;
+      assert.ok(fitsResponse(bounded));
+      assert.equal(bounded.framesDropped, true);
+      assert.ok(bounded.frames.length > 0 && bounded.frames.length < 50);
     } finally {
       globalThis.fetch = realFetch;
     }

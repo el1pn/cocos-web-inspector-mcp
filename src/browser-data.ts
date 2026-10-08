@@ -85,8 +85,7 @@ const idOf = (request: Request) => {
   return id;
 };
 
-export async function networkRequests(page: Page, options: { urlContains?: string | undefined; resourceType?: string | undefined; failedOnly?: boolean | undefined; limit?: number | undefined }): Promise<unknown> {
-  const limit = options.limit ?? 50;
+export async function networkRequests(page: Page, options: RequestFilter): Promise<unknown> {
   const rows = await Promise.all((await page.requests()).map(async request => {
     const response = await request.response().catch(() => null);
     const failure = request.failure()?.errorText;
@@ -101,10 +100,19 @@ export async function networkRequests(page: Page, options: { urlContains?: strin
       ...(timing.responseEnd > 0 ? { durationMs: Math.round(timing.responseEnd) } : {}),
     };
   }));
+  return selectRequests(rows, options, 'Requests since this server attached; Playwright drops old entries to bound memory.');
+}
+
+type RequestRow = { url: string; resourceType: string; status: number | null; failure?: string };
+type RequestFilter = { urlContains?: string | undefined; resourceType?: string | undefined; failedOnly?: boolean | undefined; limit?: number | undefined };
+
+/** Filters request rows and keeps the newest `limit`; shared by the browser and native network tools. */
+export function selectRequests<T extends RequestRow>(rows: T[], options: RequestFilter, note: string) {
+  const limit = options.limit ?? 50;
   const matched = rows.filter(row => (!options.urlContains || row.url.includes(options.urlContains))
     && (!options.resourceType || row.resourceType === options.resourceType)
     && (!options.failedOnly || row.failure || (row.status ?? 0) >= 400));
-  return { requests: matched.slice(-limit), matched: matched.length, truncated: matched.length > limit, note: 'Requests since this server attached; Playwright drops old entries to bound memory.' };
+  return { requests: matched.slice(-limit), matched: matched.length, truncated: matched.length > limit, note };
 }
 
 export async function networkRequest(page: Page, id: number, includeBody: boolean): Promise<unknown> {

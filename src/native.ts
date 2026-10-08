@@ -1,9 +1,9 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Page } from 'playwright-core';
-import { nodeCenter, runBridge } from './bridge.js';
+import { fitsResponse, nodeCenter, runBridge } from './bridge.js';
 import { InspectorError, validateLocalUrl } from './browser.js';
-import { redactBody, redactHeaders, redactText, redactUrl } from './browser-data.js';
+import { redactBody, redactHeaders, redactText, redactUrl, selectRequests } from './browser-data.js';
 
 type Evaluate = (webSocketUrl: string, expression: string, timeout: number) => Promise<unknown>;
 
@@ -42,7 +42,7 @@ export class NativeConnection {
     try {
       targets = await this.#targets();
     } catch (error) {
-      // An adb server restart or a USB drop takes the forward with it; restore it once on the same local port.
+      // An adb server restart or a USB drop takes the forward with it; restore it once, only to the device port this endpoint names.
       const restored = await forwardInspector(Number(this.#http.port)).catch(() => undefined);
       targets = restored === undefined ? [] : await this.#targets().catch(() => []);
       if (!targets.length) throw new InspectorError('CDP_UNAVAILABLE', `Unable to reach the native inspector at ${this.#http.host}: ${error instanceof Error ? error.message : 'unknown error'}; check that the debug build is running and adb sees the device (run doctor --native)`);
@@ -128,20 +128,19 @@ async function appProcess(page: Page): Promise<string> {
   return pid;
 }
 
-/** The inspector port of the running debug build, from the engine's own "Debugger listening" logcat line. */
-export async function inspectorPort(): Promise<number | undefined> {
-  const output = await adb(['logcat', '-d', '-s', 'Cocos:D']);
-  const ports = [...output.matchAll(/js_app\.html\?v8only=true&ws=[^:\s]+:(\d{2,5})\//g)].map(match => Number(match[1]));
-  return ports.at(-1);
+/**
+ * The inspector port from the engine's own "Debugger listening" logcat lines: the latest one, or `expected` only when
+ * some line names it. Any app can log under the Cocos tag, so reconnects pass the port they already used.
+ */
+export function inspectorPort(logcat: string, expected?: number): number | undefined {
+  const ports = [...logcat.matchAll(/js_app\.html\?v8only=true&ws=[^:\s]+:(\d{2,5})\//g)].map(match => Number(match[1])).filter(port => port >= 1_024 && port <= 65_535);
+  return expected === undefined ? ports.at(-1) : ports.includes(expected) ? expected : undefined;
 }
 
-/** Forwards a local loopback port to the device's inspector port; returns the device port, or undefined when no debug build has logged one. */
-export async function forwardInspector(localPort?: number): Promise<number | undefined> {
-  const port = await inspectorPort();
-  if (port === undefined) return undefined;
-  const local = localPort || port;
-  if (!Number.isInteger(local) || local < 1_024 || local > 65_535) throw new InspectorError('CDP_UNAVAILABLE', `Invalid local port ${local}`);
-  await adb(['forward', `tcp:${local}`, `tcp:${port}`]);
+/** Forwards the device's inspector port to the same loopback port; returns it, or undefined when no debug build has logged one. */
+export async function forwardInspector(expected?: number): Promise<number | undefined> {
+  const port = inspectorPort(await adb(['logcat', '-d', '-s', 'Cocos:D']), expected);
+  if (port !== undefined) await adb(['forward', `tcp:${port}`, `tcp:${port}`]);
   return port;
 }
 
@@ -234,14 +233,16 @@ function nativeNetwork(query: NetworkQuery): unknown {
         return open.call(this, method, url, ...rest);
       };
       proto.setRequestHeader = function (this: any, name: string, value: string) {
-        if (this.__cwi) this.__cwi.headers[String(name)] = String(value);
+        // The ring lives in game memory that other game code can read, so credential headers are masked as they are captured.
+        // ponytail: bodies stay raw in the ring and are redacted only when returned; redact here too if third-party SDKs are a concern.
+        if (this.__cwi) this.__cwi.headers[String(name)] = /auth|cookie|token|secret|api-?key|password|session/i.test(String(name)) ? '[redacted]' : String(value);
         return setHeader.call(this, name, value);
       };
       proto.send = function (this: any, body?: unknown) {
         const meta = this.__cwi;
         if (meta) {
           const entry = record({ kind: 'xhr', method: meta.method, url: meta.url, requestHeaders: meta.headers, requestBody: clip(body), startedAt: Date.now() });
-          const done = (failure?: string) => {
+          this.__cwiDone = (failure?: string) => {
             if (entry.endedAt) return;
             entry.endedAt = Date.now();
             entry.status = Number(this.status) || null;
@@ -249,19 +250,32 @@ function nativeNetwork(query: NetworkQuery): unknown {
             try { entry.responseHeaders = String(this.getAllResponseHeaders() ?? '').slice(0, 10_000); } catch { /* not ready */ }
             try { entry.responseBody = clip(this.responseType === '' || this.responseType === 'text' ? this.responseText : this.response); } catch { /* unreadable */ }
           };
-          this.addEventListener('load', () => done());
-          this.addEventListener('error', () => done('error'));
-          this.addEventListener('timeout', () => done('timeout'));
-          this.addEventListener('abort', () => done('abort'));
+          // Native XHR dispatches only through on* properties, and its addEventListener just assigns them, so listeners
+          // would replace the game's handlers. Chain through accessors instead; the native side reads them with a plain get.
+          // ponytail: reading xhr.onload returns the chain, not the game's function; keep a handler map if identity matters.
+          if (!this.__cwiHooked) {
+            this.__cwiHooked = true;
+            const xhr = this;
+            for (const [name, failure] of [['onload', undefined], ['onerror', 'error'], ['ontimeout', 'timeout'], ['onabort', 'abort']] as const) {
+              let handler: unknown = this[name];
+              const chain = function (this: unknown, event: unknown) {
+                try { xhr.__cwiDone(failure); } catch { /* never break the game */ }
+                return typeof handler === 'function' ? handler.call(this, event) : undefined;
+              };
+              Object.defineProperty(this, name, { configurable: true, get: () => chain, set: (fn: unknown) => { handler = fn; } });
+            }
+          }
         }
         return send.call(this, body);
       };
     }
     const NativeSocket = root.WebSocket;
     if (typeof NativeSocket === 'function') {
-      const Wrapped = function (this: any, url: string, protocols?: string | string[]) {
-        const socket = protocols === undefined ? new NativeSocket(url) : new NativeSocket(url, protocols);
-        const entry = record({ kind: 'websocket', method: 'GET', url: String(url), startedAt: Date.now(), frames: [] as any[], framesSeen: 0 });
+      // Pass every argument through: native WebSocket takes (url, protocols, caFilePath), and dropping the CA file
+      // changes how the game's TLS connection is verified.
+      const Wrapped = function (this: any, ...args: unknown[]) {
+        const socket = new NativeSocket(...args);
+        const entry = record({ kind: 'websocket', method: 'GET', url: String(args[0]), startedAt: Date.now(), frames: [] as any[], framesSeen: 0 });
         const frame = (direction: 'sent' | 'received', data: unknown) => {
           entry.framesSeen++;
           entry.frames.push({ direction, at: Date.now(), data: clip(data).slice(0, 2_000) });
@@ -299,8 +313,7 @@ const sinceNote = (installedAt: number, installedNow: boolean) => installedNow
   ? 'Capture started with this call; make the game send traffic, then list again.'
   : `Requests and WebSocket frames since capture started at ${new Date(installedAt).toISOString()}; the game keeps the last 200.`;
 
-export async function nativeNetworkRequests(page: Page, options: { urlContains?: string | undefined; resourceType?: string | undefined; failedOnly?: boolean | undefined; limit?: number | undefined }): Promise<unknown> {
-  const limit = options.limit ?? 50;
+export async function nativeNetworkRequests(page: Page, options: Parameters<typeof selectRequests>[1]): Promise<unknown> {
   const { installedAt, installedNow, entries } = await page.evaluate(nativeNetwork, { action: 'list' } satisfies NetworkQuery) as { installedAt: number; installedNow: boolean; entries: any[] };
   const rows = entries.map(entry => ({
     id: entry.id,
@@ -312,10 +325,7 @@ export async function nativeNetworkRequests(page: Page, options: { urlContains?:
     ...(entry.endedAt ? { durationMs: entry.endedAt - entry.startedAt } : {}),
     ...(entry.kind === 'websocket' ? { frames: entry.framesSeen } : {}),
   }));
-  const matched = rows.filter(row => (!options.urlContains || row.url.includes(options.urlContains))
-    && (!options.resourceType || row.resourceType === options.resourceType)
-    && (!options.failedOnly || row.failure || (row.status ?? 0) >= 400));
-  return { requests: matched.slice(-limit), matched: matched.length, truncated: matched.length > limit, note: sinceNote(installedAt, installedNow) };
+  return selectRequests(rows, options, sinceNote(installedAt, installedNow));
 }
 
 export async function nativeNetworkRequest(page: Page, id: number, includeBody: boolean): Promise<unknown> {
@@ -323,6 +333,17 @@ export async function nativeNetworkRequest(page: Page, id: number, includeBody: 
   if (!entry) throw new InspectorError('REQUEST_NOT_FOUND', `Request ${id} not found; list requests again, older entries are dropped`);
   // Split each "name: value" line at its first colon only; dates and URLs carry more.
   const headers = (raw: string): Record<string, string> => Object.fromEntries(raw.split(/\r?\n/).map(line => /^([^:]+):\s*(.*)$/.exec(line)).filter(match => !!match).map(match => [match![1]!.trim().toLowerCase(), match![2]!]));
+  const frames = entry.kind === 'websocket' && includeBody ? entry.frames.map((frame: any) => ({ direction: frame.direction, at: new Date(frame.at).toISOString(), data: redactBody(frame.data).body })) : undefined;
+  // Native results skip runBridge, so enforce the response ceiling here: drop the oldest frames, then the bodies.
+  let result = detail(entry, id, includeBody, headers, frames);
+  while (frames?.length && !fitsResponse(result)) {
+    frames.splice(0, Math.max(1, Math.ceil(frames.length / 4)));
+    result = { ...detail(entry, id, includeBody, headers, frames), framesDropped: true };
+  }
+  return fitsResponse(result) ? result : { ...detail(entry, id, false, headers, undefined), truncated: true, truncationReasons: ['RESPONSE_LIMIT'] };
+}
+
+function detail(entry: any, id: number, includeBody: boolean, headers: (raw: string) => Record<string, string>, frames: unknown[] | undefined): Record<string, unknown> {
   return {
     id,
     method: entry.method,
@@ -335,7 +356,7 @@ export async function nativeNetworkRequest(page: Page, id: number, includeBody: 
     ...(entry.failure ? { failure: String(entry.failure).slice(0, 300) } : {}),
     ...(entry.closeCode ? { closeCode: entry.closeCode } : {}),
     ...(includeBody && entry.responseBody ? { responseBody: redactBody(entry.responseBody) } : {}),
-    ...(entry.kind === 'websocket' ? { framesSeen: entry.framesSeen, ...(includeBody ? { frames: entry.frames.map((frame: any) => ({ direction: frame.direction, at: new Date(frame.at).toISOString(), data: redactBody(frame.data).body })) } : {}) } : {}),
+    ...(entry.kind === 'websocket' ? { framesSeen: entry.framesSeen, ...(frames ? { frames } : {}) } : {}),
     timing: { startedAt: new Date(entry.startedAt).toISOString(), ...(entry.endedAt ? { durationMs: entry.endedAt - entry.startedAt } : {}) },
   };
 }

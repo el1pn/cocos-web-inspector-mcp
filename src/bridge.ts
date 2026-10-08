@@ -36,14 +36,15 @@ type PropertyValue = boolean | number | string | { x: number; y: number; z?: num
 
 const MAX_BYTES = 200_000;
 
+/** Whether a tool result, sent as both text and structuredContent, stays under the response ceiling. */
+export function fitsResponse(result: unknown): boolean {
+  const encoded = JSON.stringify({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result });
+  return Buffer.byteLength(encoded, 'utf8') <= MAX_BYTES - 4_096;
+}
+
 export async function runBridge(page: Page, request: BridgeRequest): Promise<unknown> {
   const result = await page.evaluate(inspectCocos, request);
-  const text = JSON.stringify(result);
-  const encoded = JSON.stringify({ content: [{ type: 'text', text }], structuredContent: result });
-  if (Buffer.byteLength(encoded, 'utf8') > MAX_BYTES - 4_096) {
-    return { truncated: true, truncationReasons: ['RESPONSE_LIMIT'] };
-  }
-  return result;
+  return fitsResponse(result) ? result : { truncated: true, truncationReasons: ['RESPONSE_LIMIT'] };
 }
 
 export async function captureNode(page: Page, uuid: string): Promise<unknown> {
