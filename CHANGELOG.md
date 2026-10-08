@@ -10,6 +10,13 @@ All notable changes are documented here.
 - Native mode re-runs `adb forward` once when the inspector endpoint stops answering, so an adb server restart or a USB drop no longer needs a manual forward.
 - Native mode registers `cocos_network_requests` and `cocos_network_request` with `--allow-browser-data`: hooks installed on the first call record XHR, `fetch`, and WebSocket traffic with frames, masked like web traffic.
 - Native mode registers `cocos_storage` for `localStorage`; `session` and `cookies` report `available: false`.
+- Native mode registers `cocos_capture_node`: it crops an adb screenshot to the node's bounds and encodes a PNG without new dependencies.
+
+### Fixed
+
+- Native network capture no longer replaces the game's XHR `onload`, `onerror`, `ontimeout`, and `onabort` handlers, which left `fetch` promises pending, and passes a WebSocket's CA file argument through.
+- Native network capture masks credential headers as they enter the in-game ring, and request details stay under the response limit by dropping the oldest WebSocket frames.
+- Native forward recovery ignores out-of-range ports in logcat and reconnects only to the port the endpoint names.
 
 ## 2.2.1
 

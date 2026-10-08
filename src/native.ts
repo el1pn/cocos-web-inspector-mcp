@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { crc32, deflateSync, gunzipSync } from 'node:zlib';
 import type { Page } from 'playwright-core';
-import { fitsResponse, nodeCenter, runBridge } from './bridge.js';
+import { type Clip, fitsImage, fitsResponse, nodeCenter, runBridge, visibleClip } from './bridge.js';
 import { InspectorError, validateLocalUrl } from './browser.js';
 import { redactBody, redactHeaders, redactText, redactUrl, selectRequests } from './browser-data.js';
 
@@ -86,14 +87,15 @@ async function evaluateOverWebSocket(webSocketUrl: string, expression: string, t
 // Real input and logs go through adb on the device the inspector is forwarded from. adb picks the device itself;
 // with several attached, set ANDROID_SERIAL. Arguments are numbers or a validated package name, never free text.
 const run = promisify(execFile);
-async function adb(args: string[]): Promise<string> {
+async function adbBuffer(args: string[]): Promise<Buffer> {
   try {
-    return (await run('adb', args, { timeout: 15_000, maxBuffer: 16 * 1024 * 1024 })).stdout;
+    return (await run('adb', args, { encoding: 'buffer', timeout: 15_000, maxBuffer: 16 * 1024 * 1024 })).stdout;
   } catch (error) {
     const message = error instanceof Error ? error.message.split('\n')[0]! : 'unknown error';
     throw new InspectorError('CDP_UNAVAILABLE', `adb ${args[0]} failed: ${message.slice(0, 300)}; check adb devices, and set ANDROID_SERIAL when several are attached`);
   }
 }
+const adb = async (args: string[]) => (await adbBuffer(args)).toString();
 
 // ponytail: viewport coordinates equal screen pixels only for a full-screen game (the Cocos default); add the window offset for windowed apps.
 const pixel = (value: number) => String(Math.round(value));
@@ -116,6 +118,62 @@ export async function nativeDrag(page: Page, uuid: string, dx: number, dy: numbe
   await adb(['shell', 'input', 'swipe', pixel(from.x), pixel(from.y), pixel(to.x), pixel(to.y), String(Math.max(durationMs, 1))]);
   await settle();
   return { dragged: true, target: { nodeUuid: uuid }, from, to, input: 'adb', runtimeOnly: true };
+}
+
+// Raw `screencap` output: width, height, and pixel format as uint32 LE, a colorspace word on Android 12+, then RGBA rows
+// in the current display rotation. The device gzips it (18 MB raw takes ~20 s over Wi-Fi adb, ~1.5 s gzipped), and cropping
+// raw pixels needs only zlib here, where decoding `screencap -p` would need a PNG decoder.
+export async function nativeCaptureNode(page: Page, uuid: string): Promise<unknown> {
+  const clip = await visibleClip(page, uuid);
+  if ('reason' in clip) return { captured: false, reason: clip.reason };
+  const raw = gunzipSync(await adbBuffer(['exec-out', 'screencap | gzip -1']), { maxOutputLength: 256 * 1024 * 1024 });
+  return cropPng(raw, clip);
+}
+
+/** Crops a raw screencap to the clip and encodes an RGB PNG, sampling every n-th pixel until it fits the response. */
+export function cropPng(raw: Buffer, clip: Clip): unknown {
+  if (raw.length < 12) return { captured: false, reason: 'SCREENCAP_FAILED' };
+  const screenWidth = raw.readUInt32LE(0);
+  const screenHeight = raw.readUInt32LE(4);
+  const header = raw.length - screenWidth * screenHeight * 4;
+  // 1 is RGBA_8888 and 2 is RGBX_8888; other formats are not 4 bytes per pixel.
+  if (![1, 2].includes(raw.readUInt32LE(8)) || (header !== 12 && header !== 16)) return { captured: false, reason: 'UNSUPPORTED_PIXEL_FORMAT' };
+  // ponytail: viewport pixels equal screen pixels only for a full-screen game, as for adb taps; add the window offset for windowed apps.
+  const left = Math.max(0, Math.floor(clip.x));
+  const top = Math.max(0, Math.floor(clip.y));
+  const right = Math.min(screenWidth, Math.ceil(clip.x + clip.width));
+  const bottom = Math.min(screenHeight, Math.ceil(clip.y + clip.height));
+  if (right <= left || bottom <= top) return { captured: false, reason: 'OUTSIDE_VIEWPORT' };
+  // ponytail: nearest-pixel sampling keeps this dependency-free; box filtering would read text better when downscaled.
+  for (const step of [1, 2, 3, 4, 6, 8]) {
+    const width = Math.ceil((right - left) / step);
+    const height = Math.ceil((bottom - top) / step);
+    const rows = Buffer.alloc((width * 3 + 1) * height);
+    for (let y = 0; y < height; y++) {
+      const out = y * (width * 3 + 1) + 1;
+      const source = header + ((top + y * step) * screenWidth + left) * 4;
+      for (let x = 0; x < width; x++) raw.copy(rows, out + x * 3, source + x * step * 4, source + x * step * 4 + 3);
+    }
+    const data = png(width, height, rows).toString('base64');
+    if (fitsImage(data)) return { captured: true, mimeType: 'image/png', data, width: right - left, height: bottom - top, ...(step > 1 ? { scale: 1 / step } : {}) };
+  }
+  return { captured: false, reason: 'RESPONSE_LIMIT' };
+}
+
+function png(width: number, height: number, rows: Buffer): Buffer {
+  const chunk = (type: string, body: Buffer) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(body.length, 0);
+    head.write(type, 4, 'ascii');
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body, crc32(type)), 0);
+    return Buffer.concat([head, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr.set([8, 2, 0, 0, 0], 8); // 8-bit RGB, no interlace
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(rows, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
 }
 
 // The app's own process, from its files directory, so logs of other Cocos apps on the device never mix in.

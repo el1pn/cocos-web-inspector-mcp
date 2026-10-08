@@ -47,12 +47,24 @@ export async function runBridge(page: Page, request: BridgeRequest): Promise<unk
   return fitsResponse(result) ? result : { truncated: true, truncationReasons: ['RESPONSE_LIMIT'] };
 }
 
-export async function captureNode(page: Page, uuid: string): Promise<unknown> {
+export type Clip = { x: number; y: number; width: number; height: number };
+
+/** The node's visible viewport rectangle, or why it has none. */
+export async function visibleClip(page: Page, uuid: string): Promise<Clip | { reason: string }> {
   const result = await page.evaluate(inspectCocos, { action: 'getNodeBounds', uuid } satisfies BridgeRequest) as any;
-  if (!result.available || !result.visible) return { captured: false, reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
+  if (!result.available || !result.visible) return { reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
   const clip = result.clippedViewport;
-  if (!clip || !Number.isFinite(clip.x) || !Number.isFinite(clip.y) || !Number.isFinite(clip.width) || !Number.isFinite(clip.height) || clip.width <= 0 || clip.height <= 0) return { captured: false, reason: 'INVALID_GEOMETRY' };
-  const fits = (data: string) => Buffer.byteLength(JSON.stringify({ data }), 'utf8') <= MAX_BYTES - 4_096;
+  if (!clip || ![clip.x, clip.y, clip.width, clip.height].every(Number.isFinite) || clip.width <= 0 || clip.height <= 0) return { reason: 'INVALID_GEOMETRY' };
+  return clip;
+}
+
+/** Whether base64 image data stays under the response ceiling. */
+export const fitsImage = (data: string) => Buffer.byteLength(JSON.stringify({ data }), 'utf8') <= MAX_BYTES - 4_096;
+
+export async function captureNode(page: Page, uuid: string): Promise<unknown> {
+  const clip = await visibleClip(page, uuid);
+  if ('reason' in clip) return { captured: false, reason: clip.reason };
+  const fits = fitsImage;
   const size = { width: Math.round(clip.width), height: Math.round(clip.height) };
   // Device-pixel PNG, then CSS-pixel JPEG quality steps.
   const attempts: Array<{ type: 'png' | 'jpeg'; quality?: number; scale: 'device' | 'css' }> = [{ type: 'png', scale: 'device' }, ...[80, 60, 40].map(quality => ({ type: 'jpeg' as const, quality, scale: 'css' as const }))];
@@ -75,10 +87,8 @@ export async function captureNode(page: Page, uuid: string): Promise<unknown> {
 }
 
 export async function nodeCenter(page: Page, uuid: string): Promise<{ x: number; y: number } | { reason: string }> {
-  const result = await page.evaluate(inspectCocos, { action: 'getNodeBounds', uuid } satisfies BridgeRequest) as any;
-  if (!result.available || !result.visible) return { reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
-  const clip = result.clippedViewport;
-  return { x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 };
+  const clip = await visibleClip(page, uuid);
+  return 'reason' in clip ? clip : { x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 };
 }
 
 // Under touch emulation Chrome turns mouse input into touch and never acknowledges Playwright's mouse calls, so send touch directly.

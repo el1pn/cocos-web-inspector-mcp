@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
-import { nativeClick, nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativeTypeText, type NativeConnection } from './native.js';
+import { nativeCaptureNode, nativeClick,nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativeTypeText, type NativeConnection } from './native.js';
 import { consoleMessages, networkRequest, networkRequests, storage } from './browser-data.js';
 import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, inspectCocosPage, networkProfileNames, runBridge, typeText, type BridgeRequest } from './bridge.js';
 
@@ -146,11 +146,11 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     annotations: readOnly,
   }, input => executeNode(input, uuid => ({ action: 'getNodeBounds', uuid })));
 
-  if (web) server.registerTool('cocos_capture_node', {
+  server.registerTool('cocos_capture_node', {
     description: 'Capture a bounded viewport-clipped PNG for one visible Cocos UI node UUID.',
     inputSchema: z.object({ pageUrl, ...target }).strict().refine(oneTarget, oneTargetMessage),
     annotations: readOnly,
-  }, input => withNode(input, captureNode));
+  }, input => withNode(input, web ? captureNode : nativeCaptureNode));
 
   server.registerTool('cocos_get_components', {
     description: 'List bounded component summaries for one Cocos node UUID.',

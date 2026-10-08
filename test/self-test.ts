@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { crc32, inflateSync } from 'node:zlib';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { sanitizeUrl, validateLocalUrl, BrowserConnection } from '../src/browser.js';
-import { captureNode, fitsResponse, inspectCocos, runBridge } from '../src/bridge.js';
+import { captureNode, fitsImage, fitsResponse, inspectCocos, runBridge } from '../src/bridge.js';
 import { redactBody, redactHeaders, redactText, redactUrl } from '../src/browser-data.js';
-import { inspectorPort, NativeConnection, nativeNetworkRequest, nativeNetworkRequests, parseCocosLogcat } from '../src/native.js';
+import { cropPng, inspectorPort, NativeConnection, nativeNetworkRequest, nativeNetworkRequests, parseCocosLogcat } from '../src/native.js';
 import { createServer } from '../src/server.js';
 
 function fakeBrowser(pageUrl = 'http://localhost:3000') {
@@ -594,8 +595,8 @@ test('MCP in native mode omits tools that need a browser page', async () => {
   try {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     const names = (await client.listTools()).tools.map(tool => tool.name);
-    for (const name of ['cocos_capture_node', 'cocos_emulate_device', 'cocos_analyze_batches', 'cocos_highlight_node', 'cocos_get_selection', 'cocos_step_frame']) assert.equal(names.includes(name), false, name);
-    for (const name of ['cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_console_messages', 'cocos_network_requests', 'cocos_network_request', 'cocos_storage']) assert.ok(names.includes(name), name);
+    for (const name of ['cocos_emulate_device', 'cocos_analyze_batches', 'cocos_highlight_node', 'cocos_get_selection', 'cocos_step_frame']) assert.equal(names.includes(name), false, name);
+    for (const name of ['cocos_capture_node', 'cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_console_messages', 'cocos_network_requests', 'cocos_network_request', 'cocos_storage']) assert.ok(names.includes(name), name);
   } finally {
     await Promise.allSettled([client.close(), server.close(), native.close()]);
   }
@@ -634,6 +635,53 @@ test('asset report matches native assets whose uuid sits behind an accessor', ()
   } finally {
     (globalThis as any).cc = previous;
   }
+});
+
+test('native capture crops a raw screencap into a valid PNG and downsamples to fit the response', () => {
+  const screencap = (width: number, height: number, header: number, pixel: (x: number, y: number) => number[]) => {
+    const raw = Buffer.alloc(header + width * height * 4);
+    raw.writeUInt32LE(width, 0);
+    raw.writeUInt32LE(height, 4);
+    raw.writeUInt32LE(1, 8);
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) raw.set(pixel(x, y), header + (y * width + x) * 4);
+    return raw;
+  };
+  const decode = (data: string) => {
+    const file = Buffer.from(data, 'base64');
+    assert.deepEqual([...file.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const width = file.readUInt32BE(16);
+    const height = file.readUInt32BE(20);
+    let offset = 8;
+    const idat: Buffer[] = [];
+    while (offset < file.length) {
+      const length = file.readUInt32BE(offset);
+      const type = file.toString('ascii', offset + 4, offset + 8);
+      const body = file.subarray(offset + 8, offset + 8 + length);
+      assert.equal(file.readUInt32BE(offset + 8 + length), crc32(body, crc32(type)), `${type} crc`);
+      if (type === 'IDAT') idat.push(body);
+      offset += 12 + length;
+    }
+    return { width, height, rows: inflateSync(Buffer.concat(idat)) };
+  };
+  // Android 12+ adds a colorspace word, so the header is 16 bytes there and 12 before.
+  for (const header of [12, 16]) {
+    const raw = screencap(8, 6, header, (x, y) => [x * 10, y * 10, 200, 255]);
+    const result = cropPng(raw, { x: 2.4, y: 1, width: 3, height: 2.5 }) as any;
+    assert.equal(result.captured, true);
+    const { width, height, rows } = decode(result.data);
+    assert.deepEqual([width, height, result.width, result.height], [4, 3, 4, 3]);
+    // Row 0 starts with filter byte 0, then pixel (2, 1) as RGB.
+    assert.deepEqual([...rows.subarray(0, 4)], [0, 20, 10, 200]);
+    assert.deepEqual([...rows.subarray(13 * 2 + 1, 13 * 2 + 4)], [20, 30, 200], 'row 2 starts at pixel (2, 3)');
+  }
+  assert.deepEqual(cropPng(screencap(8, 6, 12, () => [0, 0, 0, 255]), { x: 10, y: 0, width: 4, height: 4 }), { captured: false, reason: 'OUTSIDE_VIEWPORT' });
+  assert.deepEqual(cropPng(Buffer.alloc(4), { x: 0, y: 0, width: 1, height: 1 }), { captured: false, reason: 'SCREENCAP_FAILED' });
+  // Random pixels do not compress, so a 1080x1080 crop must downsample to fit the ceiling.
+  const noisy = screencap(1080, 1080, 16, () => [Math.random() * 256, Math.random() * 256, Math.random() * 256, 255]);
+  const large = cropPng(noisy, { x: 0, y: 0, width: 1080, height: 1080 }) as any;
+  assert.equal(large.captured, true);
+  assert.ok(large.scale < 1 && fitsImage(large.data));
+  assert.equal(decode(large.data).width, Math.ceil(1080 * large.scale));
 });
 
 test('native inspector port comes from the latest valid logcat line, or only the expected one on reconnect', () => {
