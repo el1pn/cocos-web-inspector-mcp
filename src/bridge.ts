@@ -817,10 +817,9 @@ export function inspectCocos(request: BridgeRequest): unknown {
       }
     }
     if (selected === node) {
-      for (const key of ['name', 'active', 'activeInHierarchy']) {
-        const value = dataProperty(node, key) ?? dataProperty(node, `_${key}`);
-        if (typeof value === 'string' || typeof value === 'boolean') displayFields[key] = typeof value === 'string' ? value.slice(0, 500) : value;
-      }
+      // Native (JSB) nodes keep these in C++ behind accessors; summary reads the same public getters the scene tree reports.
+      const { name, active, activeInHierarchy } = summary(node);
+      Object.assign(displayFields, { name, active, activeInHierarchy });
     }
     if (typeof cc.Sprite === 'function' && selected instanceof cc.Sprite) {
       const frame = dataProperty(selected, '_spriteFrame');
@@ -1133,7 +1132,18 @@ export function inspectCocos(request: BridgeRequest): unknown {
 
   // Asset helpers read backing fields only; refCount, width, and texture getters stay untouched.
   const assetName = (asset: any) => String(dataProperty(asset, '_name') ?? '').slice(0, 500);
-  const assetUuid = (asset: any) => String(dataProperty(asset, '_uuid') ?? '');
+  // Native (JSB) assets keep _uuid behind a C++ accessor, which data reads skip; the asset cache is keyed by uuid, so look it up there.
+  let cachedUuids: Map<any, string> | undefined;
+  const assetUuid = (asset: any): string => {
+    const own = dataProperty(asset, '_uuid');
+    if (typeof own === 'string' && own) return own;
+    if (!cachedUuids) {
+      cachedUuids = new Map();
+      const map = dataProperty(cc.assetManager?.assets ?? {}, '_map');
+      for (const [key, value] of Object.entries((map && typeof map === 'object' ? map : {}) as Record<string, any>)) if (value && typeof value === 'object') cachedUuids.set(value, key);
+    }
+    return cachedUuids.get(asset) ?? '';
+  };
   const gfxBytes = (texture: any): number | undefined => {
     const gfx = texture && typeof texture === 'object' ? dataProperty(texture, '_gfxTexture') : undefined;
     const size = gfx && typeof gfx === 'object' ? dataProperty(gfx, '_size') : undefined;
@@ -1565,10 +1575,13 @@ export function inspectCocos(request: BridgeRequest): unknown {
     // Unused first, then by GPU bytes and refCount: the likeliest leaks lead.
     items.sort((a, b) => Number(b.status === 'unused') - Number(a.status === 'unused') || (b.bytes ?? 0) - (a.bytes ?? 0) || b.refCount - a.refCount);
     const memory = dataProperty(dataProperty(dataProperty(cc.director, '_root') ?? {}, '_device') ?? {}, '_memoryStatus');
+    // Native (JSB) GFX textures live in C++ and expose no byte size to JS; report that instead of zeros that read as "no textures".
+    const textureCount = Object.entries(byType).filter(([type]) => /Texture/.test(type)).reduce((sum, [, bucket]) => sum + bucket.count, 0);
+    const bytesUnavailable = totalBytes === 0 && textureCount > 0;
     return {
       version,
       assetCount: Math.min(total, 50_000),
-      textureBytes: totalBytes,
+      ...(bytesUnavailable ? { textureBytes: null, unavailableMetrics: { textureBytes: 'UNSUPPORTED_PUBLIC_API' } } : { textureBytes: totalBytes }),
       ...(memory ? { gpuMemory: { textureBytes: Number(dataProperty(memory, 'textureSize') ?? 0), bufferBytes: Number(dataProperty(memory, 'bufferSize') ?? 0) } } : {}),
       byType,
       assets: items.slice(0, limit),

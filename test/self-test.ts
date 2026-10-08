@@ -611,3 +611,27 @@ test('native console parses Cocos logcat lines by level', () => {
   ].join('\n');
   assert.deepEqual(parseCocosLogcat(output).map(({ type, text }) => [type, text]), [['log', 'JS: hello'], ['error', 'JS: boom'], ['warning', 'JS: careful']]);
 });
+
+test('asset report matches native assets whose uuid sits behind an accessor', () => {
+  // On native (JSB) builds Asset._uuid is a C++ accessor, so only the cache key names the asset.
+  class Texture2D { get _uuid() { return 'tex-1'; } }
+  class SpriteFrame { _texture = new Texture2D(); get _uuid() { return 'frame-1'; } }
+  const frame = new SpriteFrame();
+  const unusedTexture = new Texture2D();
+  class Sprite { _spriteFrame = frame; }
+  const scene = { name: 'Scene', children: [{ name: 'Logo', children: [], components: [new Sprite()] }], components: [] };
+  const previous = (globalThis as any).cc;
+  (globalThis as any).cc = {
+    ENGINE_VERSION: '3.8.8',
+    director: { getScene: () => scene },
+    assetManager: { assets: { _map: { 'frame-1': frame, 'tex-1': frame._texture, 'tex-2': unusedTexture } } },
+  };
+  try {
+    const report = inspectCocos({ action: 'assetReport' }) as { assets: Array<{ uuid: string; status: string }>; textureBytes: unknown; unavailableMetrics?: unknown };
+    assert.deepEqual(Object.fromEntries(report.assets.map(asset => [asset.uuid, asset.status])), { 'frame-1': 'used', 'tex-1': 'used', 'tex-2': 'unused' });
+    assert.equal(report.textureBytes, null, 'native textures expose no byte size');
+    assert.deepEqual(report.unavailableMetrics, { textureBytes: 'UNSUPPORTED_PUBLIC_API' });
+  } finally {
+    (globalThis as any).cc = previous;
+  }
+});

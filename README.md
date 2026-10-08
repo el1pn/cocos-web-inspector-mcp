@@ -64,7 +64,9 @@ The V8 inspector has no page, so native mode registers only the tools that read 
 - `cocos_console_messages` (with `--allow-browser-data`) reads the app process's `Cocos`-tagged logcat lines, so it includes logs from before the server attached, bounded by the device log buffer. `console.log` and `console.debug` both report as `log`; an uncaught error spans several `error` lines.
 - Not registered: `cocos_capture_node`, `cocos_emulate_device`, `cocos_highlight_node`, `cocos_get_selection` (DOM overlays draw nothing), `cocos_analyze_batches` (the native 2D batcher runs in C++), `cocos_step_frame` (stepping from the inspector renders outside the native frame loop and crashed the app), and the network and storage tools.
 
-The inspector accepts one session at a time, so the server connects per call; Chrome DevTools can attach between calls, and a call made while DevTools is attached fails with `CDP_UNAVAILABLE`. If calls start failing with `CDP_UNAVAILABLE` while the app runs, the adb server restarted and dropped the forward; run `adb forward` again.
+The inspector accepts one session at a time, so the server connects per call; Chrome DevTools can attach between calls, and a call made while DevTools is attached fails with `CDP_UNAVAILABLE`. If calls start failing with `CDP_UNAVAILABLE` while the app runs, the adb server restarted or the device dropped off USB, which takes the forward with it; run `adb forward` again. When a phone keeps dropping off USB (common through hubs), switch adb to Wi-Fi with `adb tcpip 5555` and `adb connect <phone-ip>:5555`, then forward and set `ANDROID_SERIAL=<phone-ip>:5555`; the endpoint stays `127.0.0.1`.
+
+Only a build with the inspector compiled in can attach. If a game's Debug build fails, setting `USE_V8_DEBUGGER_FORCE` and `CC_DEBUG_FORCE` to `ON` in `native/engine/common/CMakeLists.txt` keeps the inspector in a release build; never ship such a build.
 
 ## Install and run
 

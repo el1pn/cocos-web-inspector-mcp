@@ -2,6 +2,14 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Fixed
+
+- Native builds: `cocos_asset_report` no longer marks every asset a scene renderer uses as `unused`; native assets keep their uuid behind an accessor, so the report now names them by their asset-cache key.
+- Native builds: `cocos_asset_report` returns `textureBytes: null` with `unavailableMetrics.textureBytes: UNSUPPORTED_PUBLIC_API` instead of `0`, because native GFX textures expose no byte size to JavaScript.
+- Native builds: `cocos_get_properties` on a node, and so `cocos_wait_for_property`, returns `name`, `active`, and `activeInHierarchy`, which native nodes keep behind accessors.
+
 ## 2.2.0
 
 ### Added
