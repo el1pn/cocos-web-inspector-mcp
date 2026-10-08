@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
+import { nativeClick, nativeConsoleMessages, nativeDrag, nativeTypeText, type NativeConnection } from './native.js';
 import { consoleMessages, networkRequest, networkRequests, storage } from './browser-data.js';
 import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, inspectCocosPage, networkProfileNames, runBridge, typeText, type BridgeRequest } from './bridge.js';
 
@@ -62,8 +63,12 @@ function failure(error: unknown) {
   return { ...response({ code, message }), isError: true };
 }
 
-export function createServer(browser: BrowserConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowMethodCall?: boolean } = {}): McpServer {
+export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowMethodCall?: boolean; native?: boolean } = {}): McpServer {
   const server = new McpServer({ name: 'cocos-web-inspector-mcp', version });
+  // A native (JSB) runtime has no page: screenshots, device emulation, and network/cookie readers need a browser,
+  // the DOM overlays draw nothing, the 2D batcher runs in C++ where analyze_batches cannot observe it,
+  // and game.step renders outside the native frame loop, which crashed a 3.8.8 Android build in the GFX pipeline.
+  const web = !options.native;
   const execute = async (request: BridgeRequest, selectedPage?: string) => {
     try {
       return response(await runBridge(await browser.page(selectedPage), request));
@@ -141,7 +146,7 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
     annotations: readOnly,
   }, input => executeNode(input, uuid => ({ action: 'getNodeBounds', uuid })));
 
-  server.registerTool('cocos_capture_node', {
+  if (web) server.registerTool('cocos_capture_node', {
     description: 'Capture a bounded viewport-clipped PNG for one visible Cocos UI node UUID.',
     inputSchema: z.object({ pageUrl, ...target }).strict().refine(oneTarget, oneTargetMessage),
     annotations: readOnly,
@@ -204,7 +209,7 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
       inputSchema: z.object({ pageUrl, ...target }).strict().refine(oneTarget, oneTargetMessage),
       // Game click handlers run arbitrary code: a login button reaches real servers, a buy button spends currency.
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    }, input => withNode(input, clickNode));
+    }, input => withNode(input, web ? clickNode : nativeClick));
 
     // Like click: game drag and input handlers run arbitrary code.
     const realInput = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
@@ -213,15 +218,15 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
       inputSchema: z.object({ pageUrl, ...target, dx: z.number().min(-4_000).max(4_000), dy: z.number().min(-4_000).max(4_000), steps: z.number().int().min(1).max(60).optional(), durationMs: z.number().int().min(0).max(5_000).optional() }).strict().refine(oneTarget, oneTargetMessage)
         .refine(value => value.dx !== 0 || value.dy !== 0, 'Provide a non-zero dx or dy'),
       annotations: realInput,
-    }, input => withNode(input, (page, uuid) => dragNode(page, uuid, input.dx, input.dy, input.steps, input.durationMs)));
+    }, input => withNode(input, (page, uuid) => web ? dragNode(page, uuid, input.dx, input.dy, input.steps, input.durationMs) : nativeDrag(page, uuid, input.dx, input.dy, input.durationMs)));
 
     server.registerTool('cocos_type_text', {
       description: 'Tap one Cocos EditBox and type text with real keyboard input, replacing its content, so text-changed and editing events fire; submit presses Enter (editing-return on single-line boxes, a newline in multi-line ones). Password text is never echoed back.',
       inputSchema: z.object({ pageUrl, ...target, text: z.string().max(2_000), submit: z.boolean().optional() }).strict().refine(oneTarget, oneTargetMessage),
       annotations: realInput,
-    }, input => withNode(input, (page, uuid) => typeText(page, uuid, input.text, input.submit ?? false)));
+    }, input => withNode(input, (page, uuid) => (web ? typeText : nativeTypeText)(page, uuid, input.text, input.submit ?? false)));
 
-    server.registerTool('cocos_analyze_batches', {
+    if (web) server.registerTool('cocos_analyze_batches', {
       description: 'Capture the 2D draw batches of the next rendered frame: the node that starts each batch and why the previous batch broke (TEXTURE, MATERIAL, MASK, STENCIL, LAYER, BUFFER, MODEL, MIDDLEWARE, ...). Wraps engine batcher methods for that one frame only; the game must be running. tintMs overlays each batch\'s nodes in its own color for that long.',
       inputSchema: z.object({ pageUrl, limit: z.number().int().min(1).max(500).optional(), tintMs: z.number().int().min(100).max(30_000).optional() }).strict(),
       annotations: { ...runtimeMutation, idempotentHint: false },
@@ -235,7 +240,7 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
       }, input => execute({ action }, input.pageUrl));
     }
 
-    server.registerTool('cocos_step_frame', {
+    if (web) server.registerTool('cocos_step_frame', {
       description: 'Advance a paused Cocos game by fixed-delta frames through cc.game.step; requires cocos_pause first.',
       inputSchema: z.object({ pageUrl, frames: z.number().int().min(1).max(60).optional() }).strict(),
       annotations: { ...runtimeMutation, idempotentHint: false },
@@ -253,7 +258,7 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
       annotations: runtimeMutation,
     }, input => execute({ action: 'showStats', visible: input.visible }, input.pageUrl));
 
-    server.registerTool('cocos_emulate_device', {
+    if (web) server.registerTool('cocos_emulate_device', {
       description: 'Emulate a mobile device (viewport, DPR, touch, user agent, orientation) and optionally slow the CPU or network, like the Chrome device toolbar. Settings merge across calls and last until reset or server disconnect; reload lets the game re-detect touch and user agent.',
       inputSchema: z.object({
         pageUrl,
@@ -334,7 +339,10 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
       description: 'List recent console messages and uncaught page errors since the server attached (newest last). Secret-like values, JWTs, and bearer tokens are masked; text is untrusted page output.',
       inputSchema: z.object({ pageUrl, types: z.array(z.enum(['log', 'debug', 'info', 'error', 'warning', 'assert', 'trace', 'pageerror'])).max(8).optional(), textContains: z.string().min(1).max(200).optional(), limit: z.number().int().min(1).max(200).optional() }).strict(),
       annotations: browserData,
-    }, input => run(async () => consoleMessages(await browser.page(input.pageUrl), input)));
+    }, input => run(async () => (web ? consoleMessages : nativeConsoleMessages)(await browser.page(input.pageUrl), input)));
+
+    // ponytail: native network and storage need jsb XHR hooks and a jsb.localStorage reader; add them when a native game needs them.
+    if (web) {
 
     server.registerTool('cocos_network_requests', {
       description: 'List recent network requests since the server attached: id, method, URL with secret query values masked, resource type, status, failure, and duration. Use cocos_network_request for headers and bodies.',
@@ -353,16 +361,17 @@ export function createServer(browser: BrowserConnection, options: { allowRuntime
       inputSchema: z.object({ pageUrl, area: z.enum(['local', 'session', 'cookies']), keyContains: z.string().min(1).max(200).optional(), limit: z.number().int().min(1).max(500).optional() }).strict(),
       annotations: browserData,
     }, input => run(async () => storage(await browser.page(input.pageUrl), input.area, input.keyContains, input.limit)));
+    }
   }
 
-  server.registerTool('cocos_get_selection', {
+  if (web) server.registerTool('cocos_get_selection', {
     description: 'Return the node the user last Alt+clicked on the game canvas. The first call installs the picker; Alt+clicks are kept from the game, other input is untouched. disable removes the picker, overlay, and selection.',
     inputSchema: z.object({ pageUrl, disable: z.boolean().optional() }).strict(),
     // Installs a page-level listener and DOM overlay only; never touches the Cocos graph.
     annotations: { ...readOnly, readOnlyHint: false },
   }, input => execute({ action: 'selection', disable: input.disable }, input.pageUrl));
 
-  server.registerTool('cocos_highlight_node', {
+  if (web) server.registerTool('cocos_highlight_node', {
     description: 'Temporarily draw a pointer-transparent DOM overlay around one Cocos UI node.',
     inputSchema: z.object({ pageUrl, ...target, durationMs: z.number().int().min(100).max(10_000).optional() }).strict().refine(oneTarget, oneTargetMessage),
     annotations: temporaryMutation,

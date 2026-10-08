@@ -73,7 +73,7 @@ export async function captureNode(page: Page, uuid: string): Promise<unknown> {
   return { captured: false, reason: 'RESPONSE_LIMIT' };
 }
 
-async function nodeCenter(page: Page, uuid: string): Promise<{ x: number; y: number } | { reason: string }> {
+export async function nodeCenter(page: Page, uuid: string): Promise<{ x: number; y: number } | { reason: string }> {
   const result = await page.evaluate(inspectCocos, { action: 'getNodeBounds', uuid } satisfies BridgeRequest) as any;
   if (!result.available || !result.visible) return { reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
   const clip = result.clippedViewport;
@@ -276,7 +276,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
     __cocosWebInspectorBatchTimer?: ReturnType<typeof setTimeout>;
     __cocosWebInspectorTimeScale?: { scale: number; original: (dt: number) => void; own: boolean } | undefined;
   };
-  if (root.location) {
+  // Browsers always report a protocol; only the Cocos native (jsb) location shim has an empty one, and its endpoint was already checked to be loopback.
+  if (root.location && root.location.protocol !== '') {
     const target = new URL(root.location.href);
     const host = target.hostname.replace(/^\[|\]$/g, '').toLowerCase();
     const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
@@ -1281,7 +1282,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const screenPoint = cc.Vec2 ? new cc.Vec2((point.x - rect.left) * dpr, (rect.top + rect.height - point.y) * dpr) : undefined;
     // The global cc namespace does not expose the input singleton, so rebuild the dispatcher's order from the scene:
     // higher camera priority first, then reverse pre-order (later siblings and descendants before what they cover).
-    const candidates: Array<{ node: any; order: number; camera: number }> = [];
+    const candidates: Array<{ node: any; order: number; camera: number; windowId: number }> = [];
     let order = 0;
     walk(node => {
       order++;
@@ -1289,17 +1290,23 @@ export function inspectCocos(request: BridgeRequest): unknown {
       if (!processor || dataProperty(processor, '_isEnabled') !== true || dataProperty(processor, 'shouldHandleEventTouch') !== true || node.activeInHierarchy === false) return;
       // cachedCameraPriority is refreshed only on real dispatch, so ask the batcher, as UITransform.cameraPriority does.
       let camera = 0;
-      try { camera = Number(cc.director?.root?.batcher2D?.getFirstRenderCamera?.(node)?.priority ?? 0); } catch { camera = 0; }
-      candidates.push({ node, order, camera });
+      // Touches carry their window's id and hitTest skips other windows' cameras: 0 on the web, the native window's id (1) on device.
+      let windowId = 0;
+      try {
+        const found = cc.director?.root?.batcher2D?.getFirstRenderCamera?.(node);
+        camera = Number(found?.priority ?? 0);
+        windowId = Number(found?.systemWindowId ?? 0);
+      } catch { camera = 0; }
+      candidates.push({ node, order, camera, windowId });
     });
-    const sorted = candidates.sort((a, b) => b.camera - a.camera || b.order - a.order).map(candidate => candidate.node);
+    const sorted = candidates.sort((a, b) => b.camera - a.camera || b.order - a.order);
     const hits: Array<Record<string, unknown>> = [];
     let claimer: any;
-    for (const node of sorted) {
+    for (const { node, windowId } of sorted) {
       const transform = components(node).find(component => componentName(component) === 'UITransform');
       let hit = false;
       // hitTest is the engine's own public query: matrix math and Mask checks, no state change.
-      try { hit = !!screenPoint && typeof transform?.hitTest === 'function' && transform.hitTest(screenPoint, 0); } catch { hit = false; }
+      try { hit = !!screenPoint && typeof transform?.hitTest === 'function' && transform.hitTest(screenPoint, windowId); } catch { hit = false; }
       if (!hit) continue;
       const types = components(node).map(componentName);
       hits.push({ uuid: String(node.uuid ?? ''), name: String(node.name ?? '').slice(0, 200), components: types.slice(0, 20), ...(types.includes('BlockInputEvents') ? { blocksInput: true } : {}) });

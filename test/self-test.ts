@@ -5,6 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { sanitizeUrl, validateLocalUrl, BrowserConnection } from '../src/browser.js';
 import { captureNode, inspectCocos, runBridge } from '../src/bridge.js';
 import { redactBody, redactHeaders, redactText, redactUrl } from '../src/browser-data.js';
+import { NativeConnection, parseCocosLogcat } from '../src/native.js';
 import { createServer } from '../src/server.js';
 
 function fakeBrowser(pageUrl = 'http://localhost:3000') {
@@ -546,4 +547,67 @@ test('MCP registers cocos_call_method only with --allow-method-call', async () =
   } finally {
     await Promise.allSettled([client.close(), server.close(), browser.close()]);
   }
+});
+
+test('native connection evaluates self-contained bridge source on the loopback inspector only', async () => {
+  const realFetch = globalThis.fetch;
+  const evaluated: Array<{ url: string; expression: string }> = [];
+  globalThis.fetch = (async (input: string | URL) => {
+    assert.equal(String(input), 'http://127.0.0.1:43086/json/list');
+    // A target list naming another host must not redirect the socket off loopback.
+    return new Response(JSON.stringify([{ webSocketDebuggerUrl: 'ws://10.0.0.5:43086/abc' }]));
+  }) as typeof fetch;
+  try {
+    assert.throws(() => new NativeConnection('http://10.0.0.5:43086'), /localhost/);
+    const native = new NativeConnection('ws://127.0.0.1:43086/', 1_000, async (url, expression) => {
+      evaluated.push({ url, expression });
+      return { version: '3.8.8' };
+    });
+    const page = await native.page();
+    assert.deepEqual(await runBridge(page, { action: 'runtimeInfo' }), { version: '3.8.8' });
+    assert.equal(evaluated[0]!.url, 'ws://127.0.0.1:43086/abc');
+    assert.ok(evaluated[0]!.expression.startsWith('(function inspectCocos(') && evaluated[0]!.expression.endsWith('({"action":"runtimeInfo"})'));
+
+    globalThis.fetch = (async () => new Response(JSON.stringify([{ id: 'busy' }]))) as unknown as typeof fetch;
+    await assert.rejects(() => runBridge(page, { action: 'runtimeInfo' }), /already has a session/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('bridge accepts the Cocos native location shim but still rejects remote pages', () => withFakeCocos(() => {
+  (globalThis as any).location = { href: 'game.js', protocol: '' };
+  try {
+    assert.equal((inspectCocos({ action: 'runtimeInfo' }) as any).version, '3.8.7');
+    (globalThis as any).location = { href: 'https://example.com/', protocol: 'https:' };
+    assert.throws(() => inspectCocos({ action: 'runtimeInfo' }), /localhost/);
+  } finally {
+    delete (globalThis as any).location;
+  }
+}));
+
+test('MCP in native mode omits tools that need a browser page', async () => {
+  const native = new NativeConnection('http://127.0.0.1:43086');
+  const server = createServer(native, { allowRuntimeMutation: true, allowBrowserData: true, native: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const names = (await client.listTools()).tools.map(tool => tool.name);
+    for (const name of ['cocos_capture_node', 'cocos_emulate_device', 'cocos_network_requests', 'cocos_storage', 'cocos_analyze_batches', 'cocos_highlight_node', 'cocos_get_selection', 'cocos_step_frame']) assert.equal(names.includes(name), false, name);
+    for (const name of ['cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_console_messages']) assert.ok(names.includes(name), name);
+  } finally {
+    await Promise.allSettled([client.close(), server.close(), native.close()]);
+  }
+});
+
+test('native console parses Cocos logcat lines by level', () => {
+  const output = [
+    '--------- beginning of main',
+    '  1791369278.871  2386  2426 D Cocos   : 13:54:38 [DEBUG]: JS: hello',
+    '  1791369278.872  2386  2426 E Cocos   : 13:54:38 [ERROR]: JS: boom',
+    '  1791369278.873  2386  2426 W Cocos   : 13:54:38 [WARN]: JS: careful\r',
+    '  1791369278.874  2386  2426 I OtherTag: ignored',
+  ].join('\n');
+  assert.deepEqual(parseCocosLogcat(output).map(({ type, text }) => [type, text]), [['log', 'JS: hello'], ['error', 'JS: boom'], ['warning', 'JS: careful']]);
 });

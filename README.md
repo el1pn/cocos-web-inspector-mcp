@@ -45,6 +45,27 @@ chrome.exe --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --u
 
 Keep this browser profile separate from normal browsing. CDP provides code-execution-level access to attached pages.
 
+### Native builds (Android)
+
+A Cocos native build with **Debug** checked runs a V8 inspector inside the app; release builds do not. Attach to it over adb instead of Chromium:
+
+```sh
+adb logcat -d -s Cocos | grep "Debugger listening" -A1   # prints ws=IP_ADDR_OF_THIS_DEVICE:<port>/...
+adb forward tcp:<port> tcp:<port>
+npx --yes cocos-web-inspector-mcp --native-endpoint http://127.0.0.1:<port>
+```
+
+The template asks for port 6086, but on Android the engine moves it above 37000 when it cannot list network interfaces (43086 on a Creator 3.8.8 build), so read the port from logcat. `--native-endpoint` must be loopback, and it replaces `--cdp-endpoint` for that server process.
+
+The V8 inspector has no page, so native mode registers only the tools that read or change the Cocos graph, plus adb-backed input and logs:
+
+- `cocos_click_node` and `cocos_drag_node` tap and swipe with `adb shell input`, at the node's viewport center, which equals screen pixels for a full-screen game. `steps` does not apply to a native drag. Set `ANDROID_SERIAL` when several devices are attached.
+- `cocos_type_text` taps the EditBox, waits for the engine's Android input activity (`CocosEditBoxActivity`), clears it, and types with `adb shell input text`, so `text-changed` fires per character. Text must be printable ASCII without `%s`. The device keyboard still processes the keys, so autocorrect or a Vietnamese Telex layout can rewrite them (`test` becomes `tét`); the result reports `matches: false` with the text the game received. `submit` presses Enter, which closes a single-line box with `editing-did-ended`; `editing-return` fires only from the activity's confirm button. Clearing uses `input keycombination`, Android 12+.
+- `cocos_console_messages` (with `--allow-browser-data`) reads the app process's `Cocos`-tagged logcat lines, so it includes logs from before the server attached, bounded by the device log buffer. `console.log` and `console.debug` both report as `log`; an uncaught error spans several `error` lines.
+- Not registered: `cocos_capture_node`, `cocos_emulate_device`, `cocos_highlight_node`, `cocos_get_selection` (DOM overlays draw nothing), `cocos_analyze_batches` (the native 2D batcher runs in C++), `cocos_step_frame` (stepping from the inspector renders outside the native frame loop and crashed the app), and the network and storage tools.
+
+The inspector accepts one session at a time, so the server connects per call; Chrome DevTools can attach between calls, and a call made while DevTools is attached fails with `CDP_UNAVAILABLE`. If calls start failing with `CDP_UNAVAILABLE` while the app runs, the adb server restarted and dropped the forward; run `adb forward` again.
+
 ## Install and run
 
 Run the published npm package with the default CDP endpoint, `http://127.0.0.1:9222`:
@@ -73,7 +94,9 @@ Endpoint precedence is:
 2. `COCOS_CDP_ENDPOINT`
 3. `http://127.0.0.1:9222`
 
-`--cdp-endpoint` and `--allow-runtime-mutation` are the only server options; `launch` and `doctor` are separate commands. `--cdp-endpoint` identifies the browser CDP endpoint, not a game page URL.
+`--native-endpoint` attaches to a native debug build instead (see Native builds).
+
+`--cdp-endpoint`, `--native-endpoint`, and the `--allow-*` flags are the server options; `launch` and `doctor` are separate commands. `--cdp-endpoint` identifies the browser CDP endpoint, not a game page URL.
 
 The server uses stdio for MCP. Standard output is reserved for protocol traffic; startup diagnostics are written to standard error.
 

@@ -2,6 +2,16 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Added
+
+- `--native-endpoint` attaches to the V8 inspector of a Cocos native debug build (Android over `adb forward`) instead of Chromium. Graph inspection, reports, runtime mutation, and `cocos_call_method` work; `cocos_click_node`, `cocos_drag_node`, and `cocos_type_text` tap, swipe, and type through `adb shell input`; `cocos_console_messages` reads the app's `Cocos` logcat lines. Tools that need a browser page are not registered.
+
+### Fixed
+
+- `cocos_explain_click` hit-tests with the window id of the node's camera, so taps resolve on native builds, whose window id is 1.
+
 ## 2.1.0
 
 ### Added

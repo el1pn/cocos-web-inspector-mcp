@@ -36,6 +36,8 @@ The process is a stdio MCP server with one path from tool input to browser inspe
 3. `src/browser.ts` validates loopback-only CDP/page URLs, maintains a reusable Playwright CDP connection, and selects exactly one eligible page. Keep browser connection and target-selection policy here.
 4. `src/bridge.ts` runs `inspectCocos` through `page.evaluate`. It discovers the Cocos 3.x runtime, traverses the active scene, serializes bounded public data, and implements the temporary highlight overlay.
 
+`src/native.ts` is the alternative to `BrowserConnection` for `--native-endpoint`: it runs the same self-contained `inspectCocos` source through `Runtime.evaluate` on a Cocos native V8 inspector, one WebSocket per call because that inspector allows a single session. Native click, drag, and console run `adb` with fixed numeric or validated arguments, never free text. `createServer` with `native: true` swaps those in and omits tools that need a page, DOM, or the JS batcher.
+
 `src/browser-data.ts` holds the opt-in console, network, and storage readers and their redaction; they use Playwright page APIs, not the in-page bridge.
 
 `src/cli.ts` holds the user-facing `launch` and `doctor` commands, loaded by `src/index.ts` only when the first argument names one. They reuse the browser and bridge modules; the MCP server path never launches a browser. Device emulation (`emulateDevice` in `src/bridge.ts`) runs over a per-page CDP session kept open for the life of the emulation, because Chrome drops overrides when that session detaches.
