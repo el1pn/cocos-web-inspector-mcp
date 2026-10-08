@@ -50,10 +50,11 @@ Keep this browser profile separate from normal browsing. CDP provides code-execu
 A Cocos native build with **Debug** checked runs a V8 inspector inside the app; release builds do not. Attach to it over adb instead of Chromium:
 
 ```sh
-adb logcat -d -s Cocos | grep "Debugger listening" -A1   # prints ws=IP_ADDR_OF_THIS_DEVICE:<port>/...
-adb forward tcp:<port> tcp:<port>
+npx --yes cocos-web-inspector-mcp doctor --native   # finds the port in logcat, runs adb forward, checks the scene
 npx --yes cocos-web-inspector-mcp --native-endpoint http://127.0.0.1:<port>
 ```
+
+`doctor --native` reads the port from the engine's `Debugger listening` logcat line, forwards it to the same loopback port, and prints the `claude mcp add` command. By hand: `adb logcat -d -s Cocos | grep "Debugger listening" -A1`, then `adb forward tcp:<port> tcp:<port>`.
 
 The template asks for port 6086, but on Android the engine moves it above 37000 when it cannot list network interfaces (43086 on a Creator 3.8.8 build), so read the port from logcat. `--native-endpoint` must be loopback, and it replaces `--cdp-endpoint` for that server process.
 
@@ -61,10 +62,11 @@ The V8 inspector has no page, so native mode registers only the tools that read 
 
 - `cocos_click_node` and `cocos_drag_node` tap and swipe with `adb shell input`, at the node's viewport center, which equals screen pixels for a full-screen game. `steps` does not apply to a native drag. Set `ANDROID_SERIAL` when several devices are attached.
 - `cocos_type_text` taps the EditBox, waits for the engine's Android input activity (`CocosEditBoxActivity`), clears it, and types with `adb shell input text`, so `text-changed` fires per character. Text must be printable ASCII without `%s`. The device keyboard still processes the keys, so autocorrect or a Vietnamese Telex layout can rewrite them (`test` becomes `tét`); the result reports `matches: false` with the text the game received. `submit` presses Enter, which closes a single-line box with `editing-did-ended`; `editing-return` fires only from the activity's confirm button. Clearing uses `input keycombination`, Android 12+.
+- With `--allow-browser-data`, `cocos_network_requests` and `cocos_network_request` report XHR, `fetch` (which the native polyfill runs over XHR), and WebSocket traffic. The first network call installs hooks in the game that keep the last 200 requests and the last 50 frames per socket, so traffic before that call is not seen; the note says when capture started. Bodies and frames are masked like web bodies, headers like web headers. `cocos_storage` reads `localStorage` (native builds back it with SQLite); `session` and `cookies` report `available: false`, since native builds have neither.
 - `cocos_console_messages` (with `--allow-browser-data`) reads the app process's `Cocos`-tagged logcat lines, so it includes logs from before the server attached, bounded by the device log buffer. `console.log` and `console.debug` both report as `log`; an uncaught error spans several `error` lines.
-- Not registered: `cocos_capture_node`, `cocos_emulate_device`, `cocos_highlight_node`, `cocos_get_selection` (DOM overlays draw nothing), `cocos_analyze_batches` (the native 2D batcher runs in C++), `cocos_step_frame` (stepping from the inspector renders outside the native frame loop and crashed the app), and the network and storage tools.
+- Not registered: `cocos_capture_node`, `cocos_emulate_device`, `cocos_highlight_node`, `cocos_get_selection` (DOM overlays draw nothing), `cocos_analyze_batches` (the native 2D batcher runs in C++), and `cocos_step_frame` (stepping from the inspector renders outside the native frame loop and crashed the app).
 
-The inspector accepts one session at a time, so the server connects per call; Chrome DevTools can attach between calls, and a call made while DevTools is attached fails with `CDP_UNAVAILABLE`. If calls start failing with `CDP_UNAVAILABLE` while the app runs, the adb server restarted or the device dropped off USB, which takes the forward with it; run `adb forward` again. When a phone keeps dropping off USB (common through hubs), switch adb to Wi-Fi with `adb tcpip 5555` and `adb connect <phone-ip>:5555`, then forward and set `ANDROID_SERIAL=<phone-ip>:5555`; the endpoint stays `127.0.0.1`.
+The inspector accepts one session at a time, so the server connects per call; Chrome DevTools can attach between calls, and a call made while DevTools is attached fails with `CDP_UNAVAILABLE`. An adb server restart or a USB drop takes the forward with it; when the endpoint stops answering, the server reads the port from logcat and forwards it again once before failing, so a call usually recovers on its own. If calls keep failing with `CDP_UNAVAILABLE`, run `doctor --native`. When a phone keeps dropping off USB (common through hubs), switch adb to Wi-Fi with `adb tcpip 5555` and `adb connect <phone-ip>:5555`, then forward and set `ANDROID_SERIAL=<phone-ip>:5555`; the endpoint stays `127.0.0.1`.
 
 Only a build with the inspector compiled in can attach. If a game's Debug build fails, setting `USE_V8_DEBUGGER_FORCE` and `CC_DEBUG_FORCE` to `ON` in `native/engine/common/CMakeLists.txt` keeps the inspector in a release build; never ship such a build.
 

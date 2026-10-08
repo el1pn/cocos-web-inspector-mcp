@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 import { BrowserConnection, InspectorError, sanitizeUrl, validateLocalUrl } from './browser.js';
 import { devicePresetNames, emulateDevice, inspectCocosPage, networkProfileNames, type DevicePreset, type NetworkProfile } from './bridge.js';
+import { forwardInspector, NativeConnection } from './native.js';
 
 const write = (line: string) => process.stdout.write(`${line}\n`);
 
@@ -114,9 +115,33 @@ async function launch(args: string[]): Promise<void> {
   process.exit(0);
 }
 
+// Native debug builds: find the inspector port in logcat, forward it over adb, and check the Cocos runtime through it.
+async function nativeDoctor(): Promise<void> {
+  const fail = (code: string, message: string, fix: string) => {
+    write(`FAIL  ${code}: ${message}\n      Fix: ${fix}`);
+    process.exitCode = 1;
+  };
+  let port: number | undefined;
+  try {
+    port = await forwardInspector();
+  } catch (error) {
+    return fail('CDP_UNAVAILABLE', error instanceof Error ? error.message : 'adb failed', 'install Android platform-tools, check adb devices, and set ANDROID_SERIAL when several devices are attached');
+  }
+  if (port === undefined) return fail('CDP_UNAVAILABLE', 'no "Debugger listening" line in the device log', 'start a Cocos native build made with Debug checked; release builds have no inspector');
+  write(`ok    debug build listens on device port ${port}; forwarded to 127.0.0.1:${port}`);
+  const endpoint = `http://127.0.0.1:${port}`;
+  const info = await (await new NativeConnection(endpoint).page()).evaluate(inspectCocosPage).catch(error => error as Error) as { cocos?: { detected: boolean; version?: string; sceneName?: string } } | Error;
+  if (info instanceof Error) return fail('CDP_UNAVAILABLE', info.message, 'close Chrome DevTools attached to the game; the inspector takes one session at a time');
+  if (!info.cocos?.detected) return fail('COCOS_NOT_FOUND', 'no Cocos Creator 3.x runtime in the app', 'wait for the game to finish loading');
+  if (!info.cocos.sceneName) return fail('SCENE_NOT_READY', `Cocos ${info.cocos.version} has no active scene yet`, 'wait for the first scene to load');
+  write(`ok    Cocos ${info.cocos.version}, scene "${info.cocos.sceneName}"`);
+  write(`\nAdd it to Claude Code:\n  claude mcp add cocos-native -- npx -y cocos-web-inspector-mcp --native-endpoint ${endpoint}`);
+}
+
 async function doctor(args: string[]): Promise<void> {
-  const { values, positional } = flags(args, ['--cdp-endpoint']);
-  if (positional.length) throw new Error('Usage: cocos-web-inspector-mcp doctor [--cdp-endpoint <url>]');
+  const { values, positional } = flags(args, ['--cdp-endpoint'], ['--native']);
+  if (positional.length) throw new Error('Usage: cocos-web-inspector-mcp doctor [--cdp-endpoint <url> | --native]');
+  if (values['--native']) return nativeDoctor();
   const endpoint = values['--cdp-endpoint'] ?? process.env.COCOS_CDP_ENDPOINT ?? 'http://127.0.0.1:9222';
   let failed = false;
   const pass = (message: string) => write(`ok    ${message}`);

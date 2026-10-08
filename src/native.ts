@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import type { Page } from 'playwright-core';
 import { nodeCenter, runBridge } from './bridge.js';
 import { InspectorError, validateLocalUrl } from './browser.js';
-import { redactText } from './browser-data.js';
+import { redactBody, redactHeaders, redactText, redactUrl } from './browser-data.js';
 
 type Evaluate = (webSocketUrl: string, expression: string, timeout: number) => Promise<unknown>;
 
@@ -32,13 +32,20 @@ export class NativeConnection {
 
   async close(): Promise<void> {}
 
+  async #targets(): Promise<Array<{ webSocketDebuggerUrl?: string }>> {
+    const response = await fetch(new URL('/json/list', this.#http), { signal: AbortSignal.timeout(10_000) });
+    return await response.json() as Array<{ webSocketDebuggerUrl?: string }>;
+  }
+
   async #evaluate(fn: (arg: unknown) => unknown, arg: unknown): Promise<unknown> {
     let targets: Array<{ webSocketDebuggerUrl?: string }>;
     try {
-      const response = await fetch(new URL('/json/list', this.#http), { signal: AbortSignal.timeout(10_000) });
-      targets = await response.json() as typeof targets;
+      targets = await this.#targets();
     } catch (error) {
-      throw new InspectorError('CDP_UNAVAILABLE', `Unable to reach the native inspector at ${this.#http.host}: ${error instanceof Error ? error.message : 'unknown error'}; run the debug build, find its port in logcat "Debugger listening", then adb forward tcp:<port> tcp:<port>`);
+      // An adb server restart or a USB drop takes the forward with it; restore it once on the same local port.
+      const restored = await forwardInspector(Number(this.#http.port)).catch(() => undefined);
+      targets = restored === undefined ? [] : await this.#targets().catch(() => []);
+      if (!targets.length) throw new InspectorError('CDP_UNAVAILABLE', `Unable to reach the native inspector at ${this.#http.host}: ${error instanceof Error ? error.message : 'unknown error'}; check that the debug build is running and adb sees the device (run doctor --native)`);
     }
     if (!Array.isArray(targets) || targets.length === 0) throw new InspectorError('NO_LOCAL_PAGE', 'Native inspector lists no target');
     const debuggerUrl = targets.find(target => target.webSocketDebuggerUrl)?.webSocketDebuggerUrl;
@@ -121,6 +128,23 @@ async function appProcess(page: Page): Promise<string> {
   return pid;
 }
 
+/** The inspector port of the running debug build, from the engine's own "Debugger listening" logcat line. */
+export async function inspectorPort(): Promise<number | undefined> {
+  const output = await adb(['logcat', '-d', '-s', 'Cocos:D']);
+  const ports = [...output.matchAll(/js_app\.html\?v8only=true&ws=[^:\s]+:(\d{2,5})\//g)].map(match => Number(match[1]));
+  return ports.at(-1);
+}
+
+/** Forwards a local loopback port to the device's inspector port; returns the device port, or undefined when no debug build has logged one. */
+export async function forwardInspector(localPort?: number): Promise<number | undefined> {
+  const port = await inspectorPort();
+  if (port === undefined) return undefined;
+  const local = localPort || port;
+  if (!Number.isInteger(local) || local < 1_024 || local > 65_535) throw new InspectorError('CDP_UNAVAILABLE', `Invalid local port ${local}`);
+  await adb(['forward', `tcp:${local}`, `tcp:${port}`]);
+  return port;
+}
+
 const levels: Record<string, string> = { V: 'debug', D: 'log', I: 'info', W: 'warning', E: 'error', F: 'error' };
 
 /** Parses `logcat -v epoch` lines of the Cocos tag; console.log and console.debug share one level there and map to log. */
@@ -176,4 +200,142 @@ export async function nativeTypeText(page: Page, uuid: string, text: string, sub
   // The device keyboard still sees the keys: autocorrect or a Telex layout can rewrite "test" as "tét".
   const matches = typeof properties?.string === 'string' ? properties.string === text : undefined;
   return { typed: true, target: { nodeUuid: uuid }, length: text.length, submitted: submit, after, ...(matches === undefined ? {} : { matches }), ...(matches === false ? { hint: 'The device keyboard changed the text; switch it to a plain English layout without autocorrect' } : {}), input: 'adb', runtimeOnly: true };
+}
+
+// Native network capture. Native builds have no DevTools Network domain, so the first network call installs hooks on
+// XMLHttpRequest (which the jsb fetch polyfill also uses) and WebSocket, keeping a bounded ring of recent traffic in the
+// game's own memory. Only requests and frames after that first call are seen. Self-contained: it runs inside the game.
+type NetworkQuery = { action: 'list' } | { action: 'get'; id: number };
+
+function nativeNetwork(query: NetworkQuery): unknown {
+  const root = globalThis as any;
+  const MAX_ENTRIES = 200;
+  const MAX_BODY = 100_000;
+  const clip = (value: unknown): string => typeof value === 'string' ? value.slice(0, MAX_BODY)
+    : value instanceof ArrayBuffer ? `[binary ${value.byteLength} bytes]` : value == null ? '' : `[${typeof value}]`;
+  let state = root.__cocosWebInspectorNetwork as { entries: any[]; nextId: number; installedAt: number } | undefined;
+  const installedNow = !state;
+  if (!state) {
+    state = root.__cocosWebInspectorNetwork = { entries: [], nextId: 1, installedAt: Date.now() };
+    const record = (entry: any) => {
+      entry.id = state!.nextId++;
+      state!.entries.push(entry);
+      if (state!.entries.length > MAX_ENTRIES) state!.entries.shift();
+      return entry;
+    };
+    const Xhr = root.XMLHttpRequest;
+    if (typeof Xhr === 'function') {
+      const proto = Xhr.prototype;
+      const open = proto.open;
+      const send = proto.send;
+      const setHeader = proto.setRequestHeader;
+      proto.open = function (this: any, method: string, url: string, ...rest: unknown[]) {
+        this.__cwi = { method: String(method).toUpperCase(), url: String(url), headers: {} as Record<string, string> };
+        return open.call(this, method, url, ...rest);
+      };
+      proto.setRequestHeader = function (this: any, name: string, value: string) {
+        if (this.__cwi) this.__cwi.headers[String(name)] = String(value);
+        return setHeader.call(this, name, value);
+      };
+      proto.send = function (this: any, body?: unknown) {
+        const meta = this.__cwi;
+        if (meta) {
+          const entry = record({ kind: 'xhr', method: meta.method, url: meta.url, requestHeaders: meta.headers, requestBody: clip(body), startedAt: Date.now() });
+          const done = (failure?: string) => {
+            if (entry.endedAt) return;
+            entry.endedAt = Date.now();
+            entry.status = Number(this.status) || null;
+            if (failure) entry.failure = failure;
+            try { entry.responseHeaders = String(this.getAllResponseHeaders() ?? '').slice(0, 10_000); } catch { /* not ready */ }
+            try { entry.responseBody = clip(this.responseType === '' || this.responseType === 'text' ? this.responseText : this.response); } catch { /* unreadable */ }
+          };
+          this.addEventListener('load', () => done());
+          this.addEventListener('error', () => done('error'));
+          this.addEventListener('timeout', () => done('timeout'));
+          this.addEventListener('abort', () => done('abort'));
+        }
+        return send.call(this, body);
+      };
+    }
+    const NativeSocket = root.WebSocket;
+    if (typeof NativeSocket === 'function') {
+      const Wrapped = function (this: any, url: string, protocols?: string | string[]) {
+        const socket = protocols === undefined ? new NativeSocket(url) : new NativeSocket(url, protocols);
+        const entry = record({ kind: 'websocket', method: 'GET', url: String(url), startedAt: Date.now(), frames: [] as any[], framesSeen: 0 });
+        const frame = (direction: 'sent' | 'received', data: unknown) => {
+          entry.framesSeen++;
+          entry.frames.push({ direction, at: Date.now(), data: clip(data).slice(0, 2_000) });
+          if (entry.frames.length > 50) entry.frames.shift();
+        };
+        const send = socket.send;
+        socket.send = function (data: unknown) { frame('sent', data); return send.call(socket, data); };
+        // Native sockets dispatch only through on* properties; wrap each handler as the game assigns it.
+        for (const [name, hook] of [
+          ['onopen', () => { entry.status = 101; }],
+          ['onmessage', (event: any) => frame('received', event?.data)],
+          ['onerror', () => { entry.failure = 'error'; }],
+          ['onclose', (event: any) => { entry.endedAt = Date.now(); entry.closeCode = Number(event?.code) || null; }],
+        ] as const) {
+          let handler: unknown = null;
+          Object.defineProperty(socket, name, {
+            configurable: true,
+            get: () => handler,
+            set: (fn: unknown) => { handler = typeof fn === 'function' ? function (this: unknown, event: unknown) { try { (hook as (event: unknown) => void)(event); } catch { /* never break the game */ } return (fn as (event: unknown) => unknown).call(this, event); } : fn; },
+          });
+        }
+        return socket;
+      } as any;
+      Wrapped.prototype = NativeSocket.prototype;
+      for (const key of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) Wrapped[key] = NativeSocket[key];
+      root.WebSocket = Wrapped;
+    }
+  }
+  if (query.action === 'list') return { installedAt: state.installedAt, installedNow, entries: state.entries.map(({ requestBody: _b, responseBody: _r, frames: _f, requestHeaders: _h, responseHeaders: _rh, ...summary }) => summary) };
+  const entry = state.entries.find(candidate => candidate.id === query.id);
+  return entry ? { installedAt: state.installedAt, entry } : { installedAt: state.installedAt, entry: null };
+}
+
+const sinceNote = (installedAt: number, installedNow: boolean) => installedNow
+  ? 'Capture started with this call; make the game send traffic, then list again.'
+  : `Requests and WebSocket frames since capture started at ${new Date(installedAt).toISOString()}; the game keeps the last 200.`;
+
+export async function nativeNetworkRequests(page: Page, options: { urlContains?: string | undefined; resourceType?: string | undefined; failedOnly?: boolean | undefined; limit?: number | undefined }): Promise<unknown> {
+  const limit = options.limit ?? 50;
+  const { installedAt, installedNow, entries } = await page.evaluate(nativeNetwork, { action: 'list' } satisfies NetworkQuery) as { installedAt: number; installedNow: boolean; entries: any[] };
+  const rows = entries.map(entry => ({
+    id: entry.id,
+    method: entry.method,
+    url: redactUrl(entry.url),
+    resourceType: entry.kind,
+    status: entry.status ?? null,
+    ...(entry.failure ? { failure: String(entry.failure).slice(0, 300) } : {}),
+    ...(entry.endedAt ? { durationMs: entry.endedAt - entry.startedAt } : {}),
+    ...(entry.kind === 'websocket' ? { frames: entry.framesSeen } : {}),
+  }));
+  const matched = rows.filter(row => (!options.urlContains || row.url.includes(options.urlContains))
+    && (!options.resourceType || row.resourceType === options.resourceType)
+    && (!options.failedOnly || row.failure || (row.status ?? 0) >= 400));
+  return { requests: matched.slice(-limit), matched: matched.length, truncated: matched.length > limit, note: sinceNote(installedAt, installedNow) };
+}
+
+export async function nativeNetworkRequest(page: Page, id: number, includeBody: boolean): Promise<unknown> {
+  const { entry } = await page.evaluate(nativeNetwork, { action: 'get', id } satisfies NetworkQuery) as { entry: any };
+  if (!entry) throw new InspectorError('REQUEST_NOT_FOUND', `Request ${id} not found; list requests again, older entries are dropped`);
+  // Split each "name: value" line at its first colon only; dates and URLs carry more.
+  const headers = (raw: string): Record<string, string> => Object.fromEntries(raw.split(/\r?\n/).map(line => /^([^:]+):\s*(.*)$/.exec(line)).filter(match => !!match).map(match => [match![1]!.trim().toLowerCase(), match![2]!]));
+  return {
+    id,
+    method: entry.method,
+    url: redactUrl(entry.url),
+    resourceType: entry.kind,
+    ...(entry.requestHeaders ? { requestHeaders: redactHeaders(entry.requestHeaders) } : {}),
+    ...(includeBody && entry.requestBody ? { requestBody: redactBody(entry.requestBody) } : {}),
+    status: entry.status ?? null,
+    ...(entry.responseHeaders ? { responseHeaders: redactHeaders(headers(entry.responseHeaders)) } : {}),
+    ...(entry.failure ? { failure: String(entry.failure).slice(0, 300) } : {}),
+    ...(entry.closeCode ? { closeCode: entry.closeCode } : {}),
+    ...(includeBody && entry.responseBody ? { responseBody: redactBody(entry.responseBody) } : {}),
+    ...(entry.kind === 'websocket' ? { framesSeen: entry.framesSeen, ...(includeBody ? { frames: entry.frames.map((frame: any) => ({ direction: frame.direction, at: new Date(frame.at).toISOString(), data: redactBody(frame.data).body })) } : {}) } : {}),
+    timing: { startedAt: new Date(entry.startedAt).toISOString(), ...(entry.endedAt ? { durationMs: entry.endedAt - entry.startedAt } : {}) },
+  };
 }

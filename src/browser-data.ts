@@ -135,6 +135,8 @@ export async function networkRequest(page: Page, id: number, includeBody: boolea
 
 export async function storage(page: Page, area: 'local' | 'session' | 'cookies', keyContains?: string, limit = 100): Promise<unknown> {
   if (area === 'cookies') {
+    // A native (JSB) runtime has no browser context or cookie jar.
+    if (typeof page.context !== 'function') return { area, available: false, reason: 'UNSUPPORTED_PUBLIC_API', entries: [], matched: 0, truncated: false };
     // Cookie values are always withheld; names and attributes are enough to debug expiry and scope.
     const cookies = (await page.context().cookies(page.url())).filter(cookie => !keyContains || cookie.name.includes(keyContains));
     return {
@@ -144,8 +146,10 @@ export async function storage(page: Page, area: 'local' | 'session' | 'cookies',
       truncated: cookies.length > limit,
     };
   }
+  // Native (JSB) builds have localStorage only, backed by a SQLite file; there is no sessionStorage or cookie jar.
   const entries = await page.evaluate(store => {
-    const target = store === 'local' ? localStorage : sessionStorage;
+    const target = store === 'local' ? localStorage : (globalThis as { sessionStorage?: Storage }).sessionStorage;
+    if (!target) return null;
     const out: Array<[string, string]> = [];
     for (let index = 0; index < target.length && index < 5_000; index++) {
       const key = target.key(index);
@@ -153,6 +157,7 @@ export async function storage(page: Page, area: 'local' | 'session' | 'cookies',
     }
     return out;
   }, area);
+  if (!entries) return { area, available: false, reason: 'UNSUPPORTED_PUBLIC_API', entries: [], matched: 0, truncated: false };
   const matched = entries.filter(([key]) => !keyContains || key.includes(keyContains));
   return {
     area,

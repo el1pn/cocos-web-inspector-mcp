@@ -3,7 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
-import { nativeClick, nativeConsoleMessages, nativeDrag, nativeTypeText, type NativeConnection } from './native.js';
+import { nativeClick, nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativeTypeText, type NativeConnection } from './native.js';
 import { consoleMessages, networkRequest, networkRequests, storage } from './browser-data.js';
 import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, inspectCocosPage, networkProfileNames, runBridge, typeText, type BridgeRequest } from './bridge.js';
 
@@ -65,7 +65,7 @@ function failure(error: unknown) {
 
 export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowMethodCall?: boolean; native?: boolean } = {}): McpServer {
   const server = new McpServer({ name: 'cocos-web-inspector-mcp', version });
-  // A native (JSB) runtime has no page: screenshots, device emulation, and network/cookie readers need a browser,
+  // A native (JSB) runtime has no page: screenshots and device emulation need a browser,
   // the DOM overlays draw nothing, the 2D batcher runs in C++ where analyze_batches cannot observe it,
   // and game.step renders outside the native frame loop, which crashed a 3.8.8 Android build in the GFX pipeline.
   const web = !options.native;
@@ -341,27 +341,23 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       annotations: browserData,
     }, input => run(async () => (web ? consoleMessages : nativeConsoleMessages)(await browser.page(input.pageUrl), input)));
 
-    // ponytail: native network and storage need jsb XHR hooks and a jsb.localStorage reader; add them when a native game needs them.
-    if (web) {
-
     server.registerTool('cocos_network_requests', {
       description: 'List recent network requests since the server attached: id, method, URL with secret query values masked, resource type, status, failure, and duration. Use cocos_network_request for headers and bodies.',
       inputSchema: z.object({ pageUrl, urlContains: z.string().min(1).max(500).optional(), resourceType: z.string().min(1).max(40).optional(), failedOnly: z.boolean().optional(), limit: z.number().int().min(1).max(200).optional() }).strict(),
       annotations: browserData,
-    }, input => run(async () => networkRequests(await browser.page(input.pageUrl), input)));
+    }, input => run(async () => (web ? networkRequests : nativeNetworkRequests)(await browser.page(input.pageUrl), input)));
 
     server.registerTool('cocos_network_request', {
       description: 'Return one request by id from cocos_network_requests: headers with authorization and cookies masked, status, timing, and optionally text bodies up to 20 KB with secret-like JSON and form fields masked.',
       inputSchema: z.object({ pageUrl, id: z.number().int().min(1), includeBody: z.boolean().optional() }).strict(),
       annotations: browserData,
-    }, input => run(async () => networkRequest(await browser.page(input.pageUrl), input.id, input.includeBody ?? false)));
+    }, input => run(async () => (web ? networkRequest : nativeNetworkRequest)(await browser.page(input.pageUrl), input.id, input.includeBody ?? false)));
 
     server.registerTool('cocos_storage', {
       description: 'Read localStorage or sessionStorage entries, or cookie names and attributes for the page. Secret-like keys and every cookie value are masked; JSON values are masked by key.',
       inputSchema: z.object({ pageUrl, area: z.enum(['local', 'session', 'cookies']), keyContains: z.string().min(1).max(200).optional(), limit: z.number().int().min(1).max(500).optional() }).strict(),
       annotations: browserData,
     }, input => run(async () => storage(await browser.page(input.pageUrl), input.area, input.keyContains, input.limit)));
-    }
   }
 
   if (web) server.registerTool('cocos_get_selection', {

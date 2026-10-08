@@ -5,7 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { sanitizeUrl, validateLocalUrl, BrowserConnection } from '../src/browser.js';
 import { captureNode, inspectCocos, runBridge } from '../src/bridge.js';
 import { redactBody, redactHeaders, redactText, redactUrl } from '../src/browser-data.js';
-import { NativeConnection, parseCocosLogcat } from '../src/native.js';
+import { NativeConnection, nativeNetworkRequest, nativeNetworkRequests, parseCocosLogcat } from '../src/native.js';
 import { createServer } from '../src/server.js';
 
 function fakeBrowser(pageUrl = 'http://localhost:3000') {
@@ -594,8 +594,8 @@ test('MCP in native mode omits tools that need a browser page', async () => {
   try {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     const names = (await client.listTools()).tools.map(tool => tool.name);
-    for (const name of ['cocos_capture_node', 'cocos_emulate_device', 'cocos_network_requests', 'cocos_storage', 'cocos_analyze_batches', 'cocos_highlight_node', 'cocos_get_selection', 'cocos_step_frame']) assert.equal(names.includes(name), false, name);
-    for (const name of ['cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_console_messages']) assert.ok(names.includes(name), name);
+    for (const name of ['cocos_capture_node', 'cocos_emulate_device', 'cocos_analyze_batches', 'cocos_highlight_node', 'cocos_get_selection', 'cocos_step_frame']) assert.equal(names.includes(name), false, name);
+    for (const name of ['cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_console_messages', 'cocos_network_requests', 'cocos_network_request', 'cocos_storage']) assert.ok(names.includes(name), name);
   } finally {
     await Promise.allSettled([client.close(), server.close(), native.close()]);
   }
@@ -633,5 +633,57 @@ test('asset report matches native assets whose uuid sits behind an accessor', ()
     assert.deepEqual(report.unavailableMetrics, { textureBytes: 'UNSUPPORTED_PUBLIC_API' });
   } finally {
     (globalThis as any).cc = previous;
+  }
+});
+
+test('native network capture records XHR and WebSocket traffic and keeps the game handlers working', async () => {
+  const listeners: Record<string, Array<() => void>> = {};
+  class FakeXhr {
+    status = 0;
+    responseType = '';
+    responseText = '';
+    open() {}
+    setRequestHeader() {}
+    addEventListener(type: string, listener: () => void) { (listeners[type] ??= []).push(listener); }
+    getAllResponseHeaders() { return 'Date: Thu, 08 Oct 2026 09:16:11 GMT\r\nSet-Cookie: sid=secret'; }
+    send() { this.status = 200; this.responseText = '{"accessToken":"abc","ok":true}'; for (const listener of listeners.load ?? []) listener(); }
+  }
+  const sent: unknown[] = [];
+  class FakeSocket { onmessage: unknown = null; send(data: unknown) { sent.push(data); } }
+  const previous = { XMLHttpRequest: (globalThis as any).XMLHttpRequest, WebSocket: (globalThis as any).WebSocket };
+  Object.assign(globalThis, { XMLHttpRequest: FakeXhr, WebSocket: FakeSocket });
+  delete (globalThis as any).__cocosWebInspectorNetwork;
+  try {
+    const page = await new NativeConnection('http://127.0.0.1:43086', 1_000, async (_url, expression) => (0, eval)(expression)).page();
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify([{ webSocketDebuggerUrl: 'ws://127.0.0.1:43086/abc' }]))) as unknown as typeof fetch;
+    try {
+      assert.match((await nativeNetworkRequests(page, {}) as { note: string }).note, /Capture started/);
+      const xhr = new (globalThis as any).XMLHttpRequest();
+      xhr.open('POST', 'https://api.example.test/login?token=t1');
+      xhr.setRequestHeader('Authorization', 'Bearer abcdefghijkl');
+      xhr.send('{"password":"p"}');
+      let received: unknown;
+      const socket = new (globalThis as any).WebSocket('wss://api.example.test/ws');
+      socket.onmessage = (event: { data: unknown }) => { received = event.data; };
+      (socket.onmessage as (event: unknown) => void)({ data: 'hello' });
+      socket.send('ping');
+      assert.equal(received, 'hello', 'the game handler still runs');
+      assert.deepEqual(sent, ['ping'], 'the native send still runs');
+      const list = await nativeNetworkRequests(page, {}) as { requests: Array<{ id: number; url: string; resourceType: string }> };
+      assert.deepEqual(list.requests.map(request => [request.resourceType, request.url]), [['xhr', 'https://api.example.test/login?token=%5Bredacted%5D'], ['websocket', 'wss://api.example.test/ws']]);
+      const detail = await nativeNetworkRequest(page, list.requests[0]!.id, true) as any;
+      assert.equal(detail.requestHeaders.Authorization, '[redacted]');
+      assert.equal(detail.responseHeaders.date, 'Thu, 08 Oct 2026 09:16:11 GMT');
+      assert.equal(detail.responseHeaders['set-cookie'], '[redacted]');
+      assert.match(detail.responseBody.body, /"accessToken":"\[redacted\]"/);
+      const socketDetail = await nativeNetworkRequest(page, list.requests[1]!.id, true) as any;
+      assert.deepEqual(socketDetail.frames.map((frame: { direction: string; data: string }) => [frame.direction, frame.data]), [['received', 'hello'], ['sent', 'ping']]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  } finally {
+    Object.assign(globalThis, previous);
+    delete (globalThis as any).__cocosWebInspectorNetwork;
   }
 });

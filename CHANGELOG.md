@@ -2,6 +2,15 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Added
+
+- `doctor --native` finds a native debug build's inspector port in logcat, runs `adb forward`, checks the Cocos scene, and prints the `claude mcp add` command.
+- Native mode re-runs `adb forward` once when the inspector endpoint stops answering, so an adb server restart or a USB drop no longer needs a manual forward.
+- Native mode registers `cocos_network_requests` and `cocos_network_request` with `--allow-browser-data`: hooks installed on the first call record XHR, `fetch`, and WebSocket traffic with frames, masked like web traffic.
+- Native mode registers `cocos_storage` for `localStorage`; `session` and `cookies` report `available: false`.
+
 ## 2.2.1
 
 ### Fixed
