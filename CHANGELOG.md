@@ -2,7 +2,7 @@
 
 All notable changes are documented here.
 
-## Unreleased
+## 2.2.1
 
 ### Fixed
 
