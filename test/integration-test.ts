@@ -275,6 +275,15 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     const snapshot = await call(client, 'cocos_snapshot_subtree', { pageUrl, uuid: panelUuid, maxDepth: 2, maxNodes: 20 });
     assert.equal(snapshot.rootUuid, panelUuid);
     assert.equal(snapshot.snapshot.uuid, panelUuid);
+    const observeInitial = await call(client, 'cocos_observe_changes', { pageUrl, uuid: panelUuid, maxDepth: 2, maxNodes: 50 });
+    assert.equal(observeInitial.mode, 'full');
+    assert.equal((await call(client, 'cocos_observe_changes', { pageUrl, uuid: panelUuid, maxDepth: 2, maxNodes: 50 })).mode, 'unchanged');
+    await page.evaluate(() => { const node = (globalThis as any).cc.director.getScene().getChildByPath('Canvas/Panel'); node.active = false; });
+    const observeChanged = await call(client, 'cocos_observe_changes', { pageUrl, uuid: panelUuid, maxDepth: 2, maxNodes: 50 });
+    assert.equal(observeChanged.mode, 'delta');
+    assert.ok(observeChanged.delta.changed.some((change: any) => change.uuid === panelUuid && change.changes.active === false));
+    await page.evaluate(() => { (globalThis as any).cc.director.getScene().getChildByPath('Canvas/Panel').active = true; });
+    assert.equal((await call(client, 'cocos_observe_changes', { pageUrl, uuid: panelUuid, maxDepth: 2, maxNodes: 50, reset: true })).reason, 'RESET');
     const bounds = await call(client, 'cocos_get_node_bounds', { pageUrl, uuid: panelUuid });
     assert.equal(bounds.available, true);
     assert.ok(bounds.visible);

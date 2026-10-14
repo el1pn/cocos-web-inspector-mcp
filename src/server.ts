@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
 import { nativeCaptureNode, nativeClick,nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativeTypeText, type NativeConnection } from './native.js';
 import { consoleMessages, networkRequest, networkRequests, storage } from './browser-data.js';
-import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, inspectCocosPage, networkProfileNames, runBridge, typeText, type BridgeRequest } from './bridge.js';
+import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fitsResponse, inspectCocosPage, networkProfileNames, runBridge, typeText, type BridgeRequest } from './bridge.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 const pageUrl = z.url().optional();
@@ -69,6 +69,62 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
   // the DOM overlays draw nothing, the 2D batcher runs in C++ where analyze_batches cannot observe it,
   // and game.step renders outside the native frame loop, which crashed a 3.8.8 Android build in the GFX pipeline.
   const web = !options.native;
+  const pageIds = new WeakMap<object, number>();
+  const baselines = new Map<string, { snapshot: any; revision: number }>();
+  let nextPageId = 1;
+  let revision = 0;
+  const pageId = (page: object) => {
+    let id = pageIds.get(page);
+    if (id === undefined) { id = nextPageId++; pageIds.set(page, id); }
+    return id;
+  };
+  const observeChanges = async (input: Target & { reset?: boolean | undefined; maxDepth?: number | undefined; maxNodes?: number | undefined }) => {
+    try {
+      const page = await browser.page(input.pageUrl);
+      const uuid = input.uuid ?? (input.path ? await resolveUuid(page, input) : undefined);
+      const snapshot = JSON.parse(JSON.stringify(await runBridge(page, { action: 'semanticSnapshot', uuid, maxDepth: input.maxDepth, maxNodes: input.maxNodes }))) as any;
+      const selector = input.uuid ? `uuid:${input.uuid}` : input.path ? `path:${input.path}` : 'scene';
+      const key = JSON.stringify([pageId(page), page.url(), snapshot.documentId ?? null, selector, input.maxDepth ?? 6, input.maxNodes ?? 500]);
+      const prior = baselines.get(key);
+      if (input.reset) baselines.delete(key);
+      const baseline = input.reset ? undefined : prior;
+      const full = (reason: string) => {
+        const next = { snapshot, revision: ++revision };
+        baselines.delete(key);
+        baselines.set(key, next);
+        while (baselines.size > 32) baselines.delete(baselines.keys().next().value!);
+        return { mode: 'full', reason, revision: next.revision, snapshot };
+      };
+      if (!baseline) return response(full(input.reset ? 'RESET' : 'BASELINE_MISSING'));
+      baselines.delete(key);
+      baselines.set(key, baseline);
+      const before = new Map((baseline.snapshot.nodes ?? []).map((node: any) => [node.uuid, node]));
+      const after = new Map((snapshot.nodes ?? []).map((node: any) => [node.uuid, node]));
+      const nodes = [...after.values()] as any[];
+      const added = nodes.filter(node => !before.has(node.uuid));
+      const removed = [...before.keys()].filter(uuid => !after.has(uuid));
+      const changed = nodes.flatMap(node => {
+        const old: any = before.get(node.uuid);
+        if (!old) return [];
+        const changes = Object.fromEntries([...new Set([...Object.keys(old), ...Object.keys(node)])]
+          .filter(field => field !== 'uuid' && JSON.stringify(node[field]) !== JSON.stringify(old[field]))
+          .map(field => [field, field in node ? node[field] : null]));
+        return Object.keys(changes).length ? [{ uuid: node.uuid, changes }] : [];
+      });
+      const metadataChanged = JSON.stringify({ truncated: snapshot.truncated, truncationReasons: snapshot.truncationReasons }) !== JSON.stringify({ truncated: baseline.snapshot.truncated, truncationReasons: baseline.snapshot.truncationReasons });
+      if (!added.length && !removed.length && !changed.length && !metadataChanged) return response({ mode: 'unchanged', revision: baseline.revision });
+      if (metadataChanged) return response(full('TRUNCATION_CHANGED'));
+      const delta = { added, removed, changed };
+      const deltaResult = { mode: 'delta', revision: revision + 1, delta };
+      if (JSON.stringify(delta).length >= JSON.stringify(snapshot).length || !fitsResponse(deltaResult)) return response(full('DELTA_NOT_SMALLER_THAN_FULL'));
+      const next = { snapshot, revision: ++revision };
+      baselines.delete(key);
+      baselines.set(key, next);
+      return response({ ...deltaResult, revision: next.revision });
+    } catch (error) {
+      return failure(error);
+    }
+  };
   const execute = async (request: BridgeRequest, selectedPage?: string) => {
     try {
       return response(await runBridge(await browser.page(selectedPage), request));
@@ -139,6 +195,12 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     inputSchema: z.object({ pageUrl, ...target, maxDepth: z.number().int().min(0).max(20).optional(), maxNodes: z.number().int().min(1).max(5_000).optional() }).strict().refine(oneTarget, oneTargetMessage),
     annotations: readOnly,
   }, input => executeNode(input, uuid => ({ action: 'snapshotSubtree', uuid, maxDepth: input.maxDepth, maxNodes: input.maxNodes })));
+
+  server.registerTool('cocos_observe_changes', {
+    description: 'Observe bounded semantic scene changes since the prior matching call.',
+    inputSchema: z.object({ pageUrl, ...target, reset: z.boolean().optional(), maxDepth: z.number().int().min(0).max(20).optional(), maxNodes: z.number().int().min(1).max(5_000).optional() }).strict().refine(value => !(value.uuid && value.path), oneTargetMessage),
+    annotations: readOnly,
+  }, input => observeChanges(input));
 
   server.registerTool('cocos_get_node_bounds', {
     description: 'Return bounded canvas and viewport bounds for one Cocos UI node UUID.',

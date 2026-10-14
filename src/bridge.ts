@@ -6,6 +6,7 @@ export type BridgeRequest =
   | { action: 'getNode'; uuid: string }
   | { action: 'getNodeBounds'; uuid: string }
   | { action: 'snapshotSubtree'; uuid: string; maxDepth?: number | undefined; maxNodes?: number | undefined }
+  | { action: 'semanticSnapshot'; uuid?: string | undefined; maxDepth?: number | undefined; maxNodes?: number | undefined }
   | { action: 'getComponents'; uuid: string }
   | { action: 'getProperties'; uuid: string; componentType?: string | undefined; componentUuid?: string | undefined; maxDepth?: number | undefined }
   | { action: 'highlightNode'; uuid: string; durationMs?: number | undefined }
@@ -340,8 +341,22 @@ export function inspectCocos(request: BridgeRequest): unknown {
     activeInHierarchy: node?.activeInHierarchy !== false,
     componentTypes: components(node).slice(0, 100).map(componentName),
   });
+  const truncatePath = (path: string) => path.length <= 10_000 ? path : `${path.slice(0, 9_999)}…`;
+  const utf8Bytes = (text: string): number => {
+    let bytes = 0;
+    for (let index = 0; index < text.length; index++) {
+      const code = text.charCodeAt(index);
+      if (code < 0x80) bytes++;
+      else if (code < 0x800) bytes += 2;
+      else if (code >= 0xd800 && code <= 0xdbff && index + 1 < text.length && (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00) {
+        bytes += 4;
+        index++;
+      } else bytes += 3;
+    }
+    return bytes;
+  };
   const walk = (visit: (node: any, path: string, depth: number) => boolean | void, limit = 5_000): { truncated: boolean } => {
-    const stack = [{ node: scene, path: `/${String(scene.name ?? '')}`, depth: 0 }];
+    const stack = [{ node: scene, path: truncatePath(`/${String(scene.name ?? '')}`), depth: 0 }];
     const seen = new Set<any>();
     let count = 0;
     let truncated = false;
@@ -358,7 +373,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
         const child = next[index];
         const childName = String(child?.name ?? '').slice(0, 500);
         const childPath = `${current.path}/${childName}`;
-        stack.push({ node: child, path: childPath.length <= 10_000 ? childPath : `${childPath.slice(0, 9_999)}…`, depth: current.depth + 1 });
+        stack.push({ node: child, path: truncatePath(childPath), depth: current.depth + 1 });
       }
     }
     return { truncated: truncated || stack.length > 0 };
@@ -662,6 +677,53 @@ export function inspectCocos(request: BridgeRequest): unknown {
     };
   }
 
+  if (request.action === 'semanticSnapshot') {
+    const rootNode = request.uuid ? findByUuid(request.uuid) : scene;
+    const maxDepth = Math.min(Math.max(request.maxDepth ?? 6, 0), 20);
+    const maxNodes = Math.min(Math.max(request.maxNodes ?? 500, 1), 5_000);
+    // ponytail: normalized snapshots stop near 65 KB; increase only with a response-size-aware transport.
+    const budget = 65_000;
+    const reasons = new Set<string>();
+    const nodes: any[] = [];
+    let bytes = 0;
+    const vector = (value: any, keys: string[]) => Object.fromEntries(keys.map(key => [key, Number(dataProperty(value ?? {}, key) ?? 0)]));
+    const collect = (node: any, path: string, depth: number) => {
+      if (nodes.length >= maxNodes) { reasons.add('NODE_LIMIT'); return; }
+      const item: any = {
+        uuid: String(dataProperty(node, 'uuid') ?? dataProperty(node, '_id') ?? ''),
+        name: String(dataProperty(node, 'name') ?? dataProperty(node, '_name') ?? '').slice(0, 500),
+        path,
+        active: (dataProperty(node, '_active') ?? dataProperty(node, 'active')) !== false,
+        position: vector(dataProperty(node, '_lpos') ?? dataProperty(node, '_position') ?? dataProperty(node, 'position'), ['x', 'y', 'z']),
+        rotation: vector(dataProperty(node, '_lrot') ?? dataProperty(node, '_rotation') ?? dataProperty(node, 'rotation'), ['x', 'y', 'z', 'w']),
+        scale: vector(dataProperty(node, '_lscale') ?? dataProperty(node, '_scale') ?? dataProperty(node, 'scale'), ['x', 'y', 'z']),
+      };
+      const transform = components(node).find(component => componentName(component) === 'UITransform');
+      const size = transform && dataProperty(transform, '_contentSize');
+      const anchor = transform && dataProperty(transform, '_anchorPoint');
+      if (size && anchor) item.uiBounds = { x: -Number(dataProperty(size, 'width') ?? 0) * Number(dataProperty(anchor, 'x') ?? 0), y: -Number(dataProperty(size, 'height') ?? 0) * Number(dataProperty(anchor, 'y') ?? 0), width: Number(dataProperty(size, 'width') ?? 0), height: Number(dataProperty(size, 'height') ?? 0) };
+      const label = components(node).find(component => componentName(component) === 'Label');
+      if (label && typeof dataProperty(label, '_string') === 'string') item.labelText = String(dataProperty(label, '_string')).slice(0, 2_000);
+      const button = components(node).find(component => componentName(component) === 'Button');
+      if (button && typeof dataProperty(button, '_interactable') === 'boolean') item.buttonInteractable = dataProperty(button, '_interactable');
+      const encoded = utf8Bytes(JSON.stringify(item));
+      if (bytes + encoded > budget) { reasons.add('RESPONSE_LIMIT'); return; }
+      bytes += encoded;
+      nodes.push(item);
+      const next = children(node);
+      if (depth >= maxDepth) { if (next.length) reasons.add('MAX_DEPTH'); return; }
+      for (const child of next) {
+        if (nodes.length >= maxNodes) { reasons.add('NODE_LIMIT'); break; }
+        collect(child, truncatePath(`${path}/${String(dataProperty(child, 'name') ?? dataProperty(child, '_name') ?? '').slice(0, 500)}`), depth + 1);
+        if (reasons.has('RESPONSE_LIMIT')) break;
+      }
+    };
+    let rootPath = truncatePath(`/${String(dataProperty(scene, 'name') ?? dataProperty(scene, '_name') ?? '').slice(0, 500)}`);
+    if (request.uuid) walk((node, path) => { if (node === rootNode) { rootPath = path; return false; } });
+    collect(rootNode, rootPath, 0);
+    return { version, ...(typeof performance !== 'undefined' && Number.isFinite(performance.timeOrigin) ? { documentId: performance.timeOrigin } : {}), rootUuid: String(dataProperty(rootNode, 'uuid') ?? dataProperty(rootNode, '_id') ?? ''), nodes, nodeCount: nodes.length, truncated: reasons.size > 0, truncationReasons: [...reasons] };
+  }
+
   if (request.action === 'snapshotSubtree') {
     const rootNode = findByUuid(request.uuid);
     const maxDepth = Math.min(Math.max(request.maxDepth ?? 6, 0), 20);
@@ -679,7 +741,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
         ...summary(node),
         components: components(node).slice(0, 200).map(component => ({ type: componentName(component), uuid: String(component.uuid ?? ''), enabled: component.enabled !== false })),
       };
-      bytes += JSON.stringify(item).length;
+      bytes += utf8Bytes(JSON.stringify(item));
       if (bytes > 70_000) {
         reasons.add('RESPONSE_LIMIT');
         return undefined;
@@ -1010,7 +1072,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
         const pathOf = (node: any) => {
           const names: string[] = [];
           for (let current = node, depth = 0; current && depth < 100; current = current.parent, depth++) names.unshift(String(current.name ?? '').slice(0, 200));
-          return `/${names.join('/')}`.slice(0, 2_000);
+          return truncatePath(`/${names.join('/')}`);
         };
         const reasons: Record<string, number> = {};
         for (const batch of batches) reasons[batch.reason] = (reasons[batch.reason] ?? 0) + 1;

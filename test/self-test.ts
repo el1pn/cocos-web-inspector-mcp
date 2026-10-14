@@ -34,7 +34,7 @@ function fakeBrowser(pageUrl = 'http://localhost:3000') {
   };
 }
 
-function withFakeCocos(run: () => void): void {
+function withFakeCocos(run: () => void | Promise<void>): void | Promise<void> {
   class UITransform {
     uuid = 'component-ui';
     enabled = true;
@@ -68,7 +68,14 @@ function withFakeCocos(run: () => void): void {
     director: { getScene: () => scene, isPaused: () => paused, pause: () => { paused = true; }, resume: () => { paused = false; } },
     view: { getVisibleSize: () => ({ width: 1280, height: 720 }), getVisibleOrigin: () => ({ x: 0, y: 0 }) },
   };
-  try { run(); } finally { (globalThis as any).cc = previous; }
+  try {
+    const result = run();
+    if (result && typeof (result as Promise<void>).then === 'function') return (result as Promise<void>).finally(() => { (globalThis as any).cc = previous; });
+    (globalThis as any).cc = previous;
+  } catch (error) {
+    (globalThis as any).cc = previous;
+    throw error;
+  }
 }
 
 test('URL policy accepts loopback and rejects unsafe targets', () => {
@@ -291,13 +298,14 @@ test('property serializer flags destroyed references without isValid', () => wit
   assert.equal(result.properties.pendingLabel.destroyed, undefined);
 }));
 
-test('snapshot stops at the byte budget and asset references collapse', () => withFakeCocos(() => {
+test('snapshot stops at the UTF-8 byte budget and asset references collapse', () => withFakeCocos(() => {
   const cc = (globalThis as any).cc;
   const scene = cc.director.getScene();
-  scene.children = Array.from({ length: 2_000 }, (_value, index) => ({ uuid: `n-${index}`, name: 'x'.repeat(100), children: [], components: [] }));
+  scene.children = Array.from({ length: 2_000 }, (_value, index) => ({ uuid: `n-${index}`, name: '猫😀'.repeat(100), children: [], components: [] }));
   const snapshot = inspectCocos({ action: 'snapshotSubtree', uuid: 'scene-1', maxDepth: 2, maxNodes: 5_000 }) as any;
-  assert.ok(snapshot.snapshot.children.length > 100 && snapshot.snapshot.children.length < 2_000);
+  assert.ok(snapshot.snapshot.children.length > 0 && snapshot.snapshot.children.length < 2_000);
   assert.deepEqual(snapshot.truncationReasons, ['RESPONSE_LIMIT']);
+  assert.ok(fitsResponse(snapshot));
 
   class Asset {}
   class SpriteFrame extends Asset { _name = 'coin'; _uuid = 'frame-1'; vertices = { uv: [0, 1] }; }
@@ -306,6 +314,39 @@ test('snapshot stops at the byte budget and asset references collapse', () => wi
   scene.children = [holder];
   const props = (inspectCocos({ action: 'getProperties', uuid: 'holder', maxDepth: 3 }) as any).properties;
   assert.deepEqual(props.frame, { $type: 'SpriteFrame', name: 'coin', uuid: 'frame-1' });
+}));
+
+test('semantic snapshot bounds CJK and emoji before the response envelope', () => withFakeCocos(() => {
+  const scene = (globalThis as any).cc.director.getScene();
+  scene.children = Array.from({ length: 2_000 }, (_value, index) => ({ uuid: `n-${index}`, name: '猫😀'.repeat(100), children: [], components: [] }));
+  const snapshot = inspectCocos({ action: 'semanticSnapshot', maxDepth: 2, maxNodes: 5_000 }) as any;
+  assert.ok(snapshot.nodes.length > 0 && snapshot.nodes.length < 2_000);
+  assert.equal(snapshot.truncated, true);
+  assert.deepEqual(snapshot.truncationReasons, ['RESPONSE_LIMIT']);
+  assert.ok(fitsResponse(snapshot));
+}));
+
+test('shared path truncation retains the canonical 10,000-character shape', () => withFakeCocos(() => {
+  const scene = (globalThis as any).cc.director.getScene();
+  scene.name = 'x'.repeat(500);
+  let parent = scene;
+  for (let index = 0; index < 21; index++) {
+    const child = { uuid: `child-${index}`, name: 'x'.repeat(500), children: [], components: [] };
+    parent.children = [child];
+    parent = child;
+  }
+  const path = (inspectCocos({ action: 'findNode', uuid: 'child-20' }) as any).matches[0].path;
+  assert.equal(path.length, 10_000);
+  assert.equal(path.at(-1), '…');
+}));
+
+test('semantic snapshot prefers local transform backing fields', () => withFakeCocos(() => {
+  const node = (globalThis as any).cc.director.getScene().children[0];
+  Object.assign(node, { _lpos: { x: 1, y: 2, z: 3 }, _lrot: { x: 4, y: 5, z: 6, w: 7 }, _lscale: { x: 8, y: 9, z: 10 }, _position: { x: 11, y: 12, z: 13 } });
+  const item = (inspectCocos({ action: 'semanticSnapshot', uuid: 'child-1' }) as any).nodes[0];
+  assert.deepEqual(item.position, { x: 1, y: 2, z: 3 });
+  assert.deepEqual(item.rotation, { x: 4, y: 5, z: 6, w: 7 });
+  assert.deepEqual(item.scale, { x: 8, y: 9, z: 10 });
 }));
 
 test('capture downscales through CDP when quality steps still exceed the limit', async () => {
@@ -440,6 +481,7 @@ test('MCP omits runtime mutation tools by default', async () => {
       'cocos_highlight_node',
       'cocos_list_pages',
       'cocos_listener_report',
+      'cocos_observe_changes',
       'cocos_runtime_diagnostics',
       'cocos_runtime_info',
       'cocos_scene_tree',
@@ -457,8 +499,107 @@ test('MCP omits runtime mutation tools by default', async () => {
     assert.ok(tools.tools.filter(tool => !['cocos_highlight_node', 'cocos_get_selection'].includes(tool.name)).every(tool => tool.annotations?.readOnlyHint === true));
     const invalid = await client.callTool({ name: 'cocos_get_components', arguments: { uuid: 'x', extra: true } });
     assert.equal(invalid.isError, true);
+    for (const args of [{ uuid: 'x', path: '/Scene/X' }, { maxDepth: 21 }, { maxNodes: 0 }, { unknown: true }]) assert.equal((await client.callTool({ name: 'cocos_observe_changes', arguments: args })).isError, true);
   } finally {
     await Promise.allSettled([client.close(), server.close(), browser.close()]);
+  }
+});
+
+test('observe changes reports semantic deltas, added and removed nodes, and removed fields as null', async () => {
+  const semanticNode = (uuid: string, name = uuid) => ({ uuid, name, path: `/Scene/${name}`, active: true, position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1, y: 1, z: 1 }, labelText: 'Label', buttonInteractable: true, uiBounds: { x: 0, y: 0, width: 1, height: 1 } });
+  let nodes: any[] = [semanticNode('scene', 'Scene'), semanticNode('stable-1'), semanticNode('stable-2')];
+  const page: any = { url: () => 'http://localhost:3000', evaluate: async (_fn: unknown, request: any) => ({ version: '3.8.8', documentId: 1, rootUuid: request.uuid ?? 'scene', nodes, nodeCount: nodes.length, truncated: false, truncationReasons: [] }) };
+  const browser: any = { page: async () => page, close: async () => {} };
+  const server = createServer(browser);
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const call = async () => (await client.callTool({ name: 'cocos_observe_changes', arguments: {} }) as any).structuredContent as any;
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const initial = await call();
+    assert.equal(initial.reason, 'BASELINE_MISSING');
+    assert.equal((await call()).revision, initial.revision);
+    nodes[0] = { uuid: 'scene', name: 'Scene', path: '/Scene/Scene', active: false, position: { x: 2, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 }, scale: { x: 1, y: 1, z: 1 } };
+    nodes.push(semanticNode('added'));
+    const delta = await call();
+    assert.equal(delta.mode, 'delta');
+    assert.equal(delta.delta.added[0].uuid, 'added');
+    assert.equal(delta.delta.changed[0].changes.labelText, null);
+    assert.equal(delta.delta.changed[0].changes.buttonInteractable, null);
+    assert.equal(delta.delta.changed[0].changes.uiBounds, null);
+    assert.deepEqual(delta.delta.changed[0].changes.position, { x: 2, y: 0, z: 0 });
+    assert.equal('uuid' in delta.delta.changed[0].changes, false);
+    nodes = nodes.filter(node => node.uuid !== 'added');
+    const removed = await call();
+    assert.equal(removed.mode, 'delta');
+    assert.deepEqual(removed.delta.removed, ['added']);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
+test('observe changes falls back to full for large deltas and isolates scopes', async () => {
+  const makeNodes = (suffix: string) => Array.from({ length: 20 }, (_value, index) => ({
+    uuid: `node-${index}`,
+    name: `Node ${index}${suffix}`,
+    path: `/Scene/Node ${index}`,
+    active: true,
+    position: { x: suffix ? index + 1 : index, y: 0, z: 0 },
+    rotation: { x: 0, y: 0, z: 0, w: 1 },
+    scale: { x: 1, y: 1, z: 1 },
+    labelText: suffix ? `Changed ${index}` : `Label ${index}`,
+  }));
+  let nodes = makeNodes('');
+  const pages: Record<string, any> = Object.fromEntries(['http://localhost:3000/a', 'http://localhost:3000/b'].map((url, index) => [url, {
+    url: () => url,
+    evaluate: async () => ({ version: '3.8.8', documentId: index + 1, rootUuid: 'scene', nodes, nodeCount: nodes.length, truncated: false, truncationReasons: [] }),
+  }]));
+  const browser: any = { page: async (url?: string) => pages[url ?? 'http://localhost:3000/a'], close: async () => {} };
+  const server = createServer(browser);
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const call = async (arguments_: Record<string, unknown>) => (await client.callTool({ name: 'cocos_observe_changes', arguments: arguments_ }) as any).structuredContent as any;
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    assert.equal((await call({ pageUrl: 'http://localhost:3000/a' })).mode, 'full');
+    assert.equal((await call({ pageUrl: 'http://localhost:3000/b' })).mode, 'full');
+    assert.equal((await call({ pageUrl: 'http://localhost:3000/a' })).mode, 'unchanged');
+    assert.equal((await call({ pageUrl: 'http://localhost:3000/a', maxDepth: 1 })).reason, 'BASELINE_MISSING');
+    nodes = makeNodes(' changed').map((node, index) => ({ ...node, uuid: `replacement-${index}` }));
+    const changed = await call({ pageUrl: 'http://localhost:3000/a' });
+    assert.equal(changed.mode, 'full');
+    assert.equal(changed.reason, 'DELTA_NOT_SMALLER_THAN_FULL');
+    assert.equal((await call({ pageUrl: 'http://localhost:3000/a', reset: true })).reason, 'RESET');
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
+test('observe changes preserves truncation metadata transitions', async () => {
+  let nodes: any[] = [{ uuid: 'scene', name: 'Scene' }];
+  let truncated = true;
+  const page: any = { url: () => 'http://localhost:3000', evaluate: async (_fn: unknown, request: any) => request?.action === 'semanticSnapshot'
+    ? { version: '3.8.8', documentId: 1, rootUuid: request.uuid ?? 'scene', nodes, nodeCount: nodes.length, truncated, truncationReasons: truncated ? ['NODE_LIMIT'] : [] }
+    : undefined };
+  const browser: any = { page: async () => page, close: async () => {} };
+  const server = createServer(browser);
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const call = async () => (await client.callTool({ name: 'cocos_observe_changes', arguments: {} }) as any).structuredContent as any;
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    assert.equal((await call()).mode, 'full');
+    assert.equal((await call()).mode, 'unchanged');
+    truncated = false;
+    const changed = await call();
+    assert.equal(changed.mode, 'full');
+    assert.equal(changed.reason, 'TRUNCATION_CHANGED');
+    assert.equal(changed.revision, 2);
+    assert.equal(changed.snapshot.truncated, false);
+    assert.deepEqual(changed.snapshot.truncationReasons, []);
+    assert.equal((await call()).mode, 'unchanged');
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
   }
 });
 
