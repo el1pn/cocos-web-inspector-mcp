@@ -353,8 +353,9 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     description: 'Explain whether a tap on a node (or at viewport x/y) reaches it, replaying the engine touch dispatch order without dispatching: which node would claim the touch, the hit stack, and reasons such as INACTIVE, BUTTON_NOT_INTERACTABLE, BLOCKED_BY_BLOCK_INPUT_EVENTS, COVERED_BY_OTHER_NODE, NO_TOUCH_LISTENER, or OUTSIDE_VIEWPORT.',
     inputSchema: z.object({ pageUrl, ...target, x: z.number().min(0).max(20_000).optional(), y: z.number().min(0).max(20_000).optional() }).strict()
       .refine(value => (value.x === undefined) === (value.y === undefined), 'Provide x and y together')
-      .refine(value => value.uuid !== undefined || value.path !== undefined || value.x !== undefined, 'Provide uuid, path, or x and y')
-      .refine(value => !(value.uuid !== undefined && value.path !== undefined), oneTargetMessage),
+      .refine(value => value.x !== undefined
+        ? value.uuid === undefined && value.path === undefined
+        : oneTarget(value), 'Provide uuid, path, or x and y'),
     annotations: readOnly,
   }, input => input.uuid === undefined && input.path === undefined
     ? execute({ action: 'explainClick', x: input.x, y: input.y }, input.pageUrl)

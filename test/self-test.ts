@@ -459,6 +459,29 @@ test('bridge rejects non-3.x runtimes', () => {
   delete (globalThis as any).cc;
 });
 
+test('MCP explain click accepts exactly one node target or a coordinate pair', async () => {
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    evaluate: async (_fn: unknown, request: any) => request.action === 'findNode'
+      ? { matches: [{ uuid: 'path-node' }] }
+      : { target: request.uuid ?? { x: request.x, y: request.y } },
+  };
+  const browser: any = { page: async () => page, close: async () => {} };
+  const server = createServer(browser);
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const call = async (arguments_: Record<string, unknown>) => client.callTool({ name: 'cocos_explain_click', arguments: arguments_ }) as Promise<any>;
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    assert.equal((await call({ uuid: 'node' })).structuredContent.target, 'node');
+    assert.equal((await call({ path: '/Scene/Node' })).structuredContent.target, 'path-node');
+    assert.deepEqual((await call({ x: 10, y: 20 })).structuredContent.target, { x: 10, y: 20 });
+    for (const arguments_ of [{}, { uuid: 'node', path: '/Scene/Node' }, { uuid: 'node', x: 10, y: 20 }, { x: 10 }, { path: '' }]) assert.equal((await call(arguments_)).isError, true);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
 test('MCP omits runtime mutation tools by default', async () => {
   const browser = new BrowserConnection('http://127.0.0.1:9222');
   const server = createServer(browser);
