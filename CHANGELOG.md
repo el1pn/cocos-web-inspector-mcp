@@ -2,6 +2,12 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Added
+
+- `cocos_press_key` (debugger mode): presses and releases one key from a fixed list (Backspace, Escape, Enter, Space, Tab, arrows) with real keyboard input, so Cocos `KEY_DOWN`/`KEY_UP` back and confirm handlers run on desktop. `holdMs` keeps the key down.
+
 ## 2.3.0
 
 ### Added

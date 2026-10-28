@@ -642,8 +642,11 @@ test('MCP exposes opted-in node active mutation with strict input', async () => 
         openWorldHint: false,
       });
     }
-    for (const name of ['cocos_click_node', 'cocos_drag_node', 'cocos_type_text']) {
+    for (const name of ['cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_press_key']) {
       assert.deepEqual(tools.tools.find(tool => tool.name === name)?.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, name);
+    }
+    for (const args of [{ key: 'a' }, { key: 'Backspace', holdMs: 2_001 }, { key: 'Backspace', extra: true }, {}]) {
+      assert.equal((await client.callTool({ name: 'cocos_press_key', arguments: args })).isError, true, JSON.stringify(args));
     }
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_analyze_batches')?.annotations?.idempotentHint, false);
     assert.equal((await client.callTool({ name: 'cocos_drag_node', arguments: { uuid: 'x', dx: 0, dy: 0 } })).isError, true);

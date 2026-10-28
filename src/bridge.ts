@@ -149,7 +149,17 @@ export async function typeText(page: Page, uuid: string, text: string, submit: b
   return { typed: true, target: { nodeUuid: uuid }, length: text.length, submitted: submit, after, runtimeOnly: true };
 }
 
-const IOS_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+// Keys games bind for back/confirm/navigation. A fixed list keeps the tool from typing arbitrary text; use cocos_type_text for that.
+export const pressableKeys = ['Backspace', 'Escape', 'Enter', 'Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'] as const;
+export type PressableKey = typeof pressableKeys[number];
+
+// Real keydown + keyup on the page, so Cocos input.on(KEY_DOWN/KEY_UP) handlers (back, escape) run. A focused DOM input (open EditBox) receives the key instead.
+export async function pressKey(page: Page, key: PressableKey, holdMs = 0): Promise<unknown> {
+  await page.keyboard.press(key, { delay: holdMs });
+  return { pressed: true, key, runtimeOnly: true };
+}
+
+const IOS_UA ='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 const IPAD_UA = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 const androidUa = (model: string) => `Mozilla/5.0 (Linux; Android 14; ${model}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36`;
 export const devicePresets = {

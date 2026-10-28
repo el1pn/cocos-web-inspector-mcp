@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
 import { nativeCaptureNode, nativeClick,nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativeTypeText, type NativeConnection } from './native.js';
 import { consoleMessages, networkRequest, networkRequests, storage } from './browser-data.js';
-import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fitsResponse, inspectCocosPage, networkProfileNames, runBridge, typeText, type BridgeRequest } from './bridge.js';
+import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fitsResponse, inspectCocosPage, networkProfileNames, pressableKeys, pressKey, runBridge, typeText, type BridgeRequest } from './bridge.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 const pageUrl = z.url().optional();
@@ -287,6 +287,18 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       inputSchema: z.object({ pageUrl, ...target, text: z.string().max(2_000), submit: z.boolean().optional() }).strict().refine(oneTarget, oneTargetMessage),
       annotations: realInput,
     }, input => withNode(input, (page, uuid) => (web ? typeText : nativeTypeText)(page, uuid, input.text, input.submit ?? false)));
+
+    if (web) server.registerTool('cocos_press_key', {
+      description: 'Press and release one keyboard key on the page with real input, so Cocos KEY_DOWN/KEY_UP handlers run: Backspace or Escape for back handlers, Enter to confirm. Not for text entry (use cocos_type_text). A focused EditBox input receives the key instead. Handlers may call game servers.',
+      inputSchema: z.object({ pageUrl, key: z.enum(pressableKeys), holdMs: z.number().int().min(0).max(2_000).optional() }).strict(),
+      annotations: realInput,
+    }, async input => {
+      try {
+        return response(await pressKey(await browser.page(input.pageUrl), input.key, input.holdMs));
+      } catch (error) {
+        return failure(error);
+      }
+    });
 
     if (web) server.registerTool('cocos_analyze_batches', {
       description: 'Capture the 2D draw batches of the next rendered frame: the node that starts each batch and why the previous batch broke (TEXTURE, MATERIAL, MASK, STENCIL, LAYER, BUFFER, MODEL, MIDDLEWARE, ...). Wraps engine batcher methods for that one frame only; the game must be running. tintMs overlays each batch\'s nodes in its own color for that long.',
