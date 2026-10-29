@@ -11,7 +11,7 @@ All notable changes are documented here.
 - `cocos_animation_report`: playing Animation states, Spine/DragonBones animations, and tween targets.
 - `cocos_frame_profile`: frame time percentiles, spikes, worst frames, and draw call and triangle ranges over sampled frames.
 - `cocos_event_trace` (debugger mode): per-event and per-node `emit` counts over a bounded window to find event storms.
-- These five tools are web only; native mode omits them.
+- All five also work in native mode (verified on an Android emulator debug build). On native, `cocos_explain_visibility` skips the layer check and `cocos_frame_profile` omits draw call and triangle ranges.
 
 ## 2.3.0
 

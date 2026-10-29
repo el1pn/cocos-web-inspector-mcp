@@ -831,8 +831,8 @@ test('MCP in native mode omits tools that need a browser page', async () => {
   try {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     const names = (await client.listTools()).tools.map(tool => tool.name);
-    for (const name of ['cocos_emulate_device', 'cocos_analyze_batches', 'cocos_highlight_node', 'cocos_get_selection', 'cocos_step_frame', 'cocos_explain_visibility', 'cocos_explain_layout', 'cocos_animation_report', 'cocos_frame_profile', 'cocos_event_trace']) assert.equal(names.includes(name), false, name);
-    for (const name of ['cocos_capture_node', 'cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_press_key', 'cocos_console_messages', 'cocos_network_requests', 'cocos_network_request', 'cocos_storage']) assert.ok(names.includes(name), name);
+    for (const name of ['cocos_emulate_device', 'cocos_analyze_batches', 'cocos_highlight_node', 'cocos_get_selection', 'cocos_step_frame']) assert.equal(names.includes(name), false, name);
+    for (const name of ['cocos_capture_node', 'cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_explain_visibility', 'cocos_explain_layout', 'cocos_animation_report', 'cocos_frame_profile', 'cocos_event_trace', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_press_key', 'cocos_console_messages', 'cocos_network_requests', 'cocos_network_request', 'cocos_storage']) assert.ok(names.includes(name), name);
   } finally {
     await Promise.allSettled([client.close(), server.close(), native.close()]);
   }
