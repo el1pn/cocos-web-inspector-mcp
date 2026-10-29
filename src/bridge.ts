@@ -149,6 +149,16 @@ export async function typeText(page: Page, uuid: string, text: string, submit: b
   return { typed: true, target: { nodeUuid: uuid }, length: text.length, submitted: submit, after, runtimeOnly: true };
 }
 
+// Keys the press tools accept: Playwright names, which native maps to Android key codes.
+export const namedKeys = ['Enter', 'Escape', 'Tab', 'Backspace', 'Delete', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'] as const;
+export const keyPattern = new RegExp(`^(?:${namedKeys.join('|')}|[a-zA-Z0-9])$`);
+
+// Real keydown/keyup for game keyboard handlers (cc.Input KEY_DOWN/KEY_UP); cocos_type_text is the path for EditBox text.
+export async function pressKey(page: Page, key: string): Promise<unknown> {
+  await page.keyboard.press(key === 'Space' ? ' ' : key);
+  return { pressed: true, key, runtimeOnly: true };
+}
+
 const IOS_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 const IPAD_UA = 'Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 const androidUa = (model: string) => `Mozilla/5.0 (Linux; Android 14; ${model}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36`;

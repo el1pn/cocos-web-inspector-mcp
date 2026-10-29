@@ -145,7 +145,7 @@ Add `--allow-runtime-mutation` for debugger tools, `--allow-browser-data` for co
 
 ## Tools
 
-All tool input objects are strict. Unknown fields are rejected. Inspection tools are annotated as read-only, idempotent, non-destructive, and closed-world. The highlight tool is annotated as a non-destructive, non-idempotent, closed-world temporary mutation because repeated calls reset its removal timer. Runtime debugger tools are non-read-only and closed-world; `cocos_click_node`, `cocos_drag_node`, and `cocos_type_text` are additionally destructive and open-world because game input handlers can reach real servers or make irreversible changes, and they, `cocos_step_frame`, and `cocos_analyze_batches` are non-idempotent.
+All tool input objects are strict. Unknown fields are rejected. Inspection tools are annotated as read-only, idempotent, non-destructive, and closed-world. The highlight tool is annotated as a non-destructive, non-idempotent, closed-world temporary mutation because repeated calls reset its removal timer. Runtime debugger tools are non-read-only and closed-world; `cocos_click_node`, `cocos_drag_node`, `cocos_type_text`, and `cocos_press_key` are additionally destructive and open-world because game input handlers can reach real servers or make irreversible changes, and they, `cocos_step_frame`, and `cocos_analyze_batches` are non-idempotent.
 
 | Tool | Purpose | Inputs |
 | --- | --- | --- |
@@ -157,6 +157,7 @@ All tool input objects are strict. Unknown fields are rejected. Inspection tools
 | `cocos_set_property` | Update one bounded public component data property. | `pageUrl?`; node `uuid`; `componentUuid`; `key`; primitive/vector/size/color `value` matching current shape |
 | `cocos_click_node` | Dispatch a real click at the visible center of one UI node so Button/touch handlers run (a tap under mobile emulation). Registered only with `--allow-runtime-mutation`. | `pageUrl?`; `uuid` |
 | `cocos_drag_node` | Drag from the visible center of one UI node with real pointer input (touch under mobile emulation), to scroll a ScrollView, flip a PageView, or move a Slider. | `pageUrl?`; `uuid`; `dx`, `dy` CSS pixels `-4000..4000`, not both zero; `steps?` `1..60`, default `10`; `durationMs?` `0..5000`, default `300` |
+| `cocos_press_key` | Press and release one key (Enter, Escape, Tab, Backspace, Delete, Space, arrows, Home, End, PageUp, PageDown, a letter, or a digit) for game keyboard handlers. Native builds send Android key events with `adb shell input keyevent`. | `pageUrl?`; `key` |
 | `cocos_type_text` | Tap one EditBox and type with real keyboard input, replacing its content, so `text-changed` and editing events fire. Returns the resulting text, or `redacted` for password boxes. | `pageUrl?`; `uuid`; `text` up to 2,000 chars; `submit?` presses Enter |
 | `cocos_analyze_batches` | Capture the 2D draw batches of the next rendered frame: the node that starts each batch and why the previous one broke. | `pageUrl?`; `limit?` `1..500`, default `100`; `tintMs?` `100..30000` overlays each batch in its own color |
 | `cocos_pause` | Pause the Cocos director when its public API supports it. | `pageUrl?` |

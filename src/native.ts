@@ -229,6 +229,15 @@ export async function nativeConsoleMessages(page: Page, options: { types?: strin
   };
 }
 
+const androidKeys: Record<string, string> = { Enter: 'KEYCODE_ENTER', Escape: 'KEYCODE_ESCAPE', Tab: 'KEYCODE_TAB', Backspace: 'KEYCODE_DEL', Delete: 'KEYCODE_FORWARD_DEL', Space: 'KEYCODE_SPACE', ArrowUp: 'KEYCODE_DPAD_UP', ArrowDown: 'KEYCODE_DPAD_DOWN', ArrowLeft: 'KEYCODE_DPAD_LEFT', ArrowRight: 'KEYCODE_DPAD_RIGHT', Home: 'KEYCODE_MOVE_HOME', End: 'KEYCODE_MOVE_END', PageUp: 'KEYCODE_PAGE_UP', PageDown: 'KEYCODE_PAGE_DOWN' };
+
+export async function nativePressKey(_page: Page, key: string): Promise<unknown> {
+  // Only validated key names reach adb, never free text.
+  await adb(['shell', 'input', 'keyevent', androidKeys[key] ?? `KEYCODE_${key.toUpperCase()}`]);
+  await settle();
+  return { pressed: true, key, input: 'adb', runtimeOnly: true };
+}
+
 // Tapping an EditBox on Android opens CocosEditBoxActivity, a native EditText whose every change fires text-changed in the game.
 export async function nativeTypeText(page: Page, uuid: string, text: string, submit: boolean): Promise<unknown> {
   // input text only types printable ASCII and turns "%s" into a space, so refuse what it would silently mangle.

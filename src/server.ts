@@ -3,9 +3,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
-import { nativeCaptureNode, nativeClick,nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativeTypeText, type NativeConnection } from './native.js';
+import { nativeCaptureNode, nativeClick,nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativePressKey, nativeTypeText, type NativeConnection } from './native.js';
 import { consoleMessages, networkRequest, networkRequests, storage } from './browser-data.js';
-import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fitsResponse, inspectCocosPage, networkProfileNames, runBridge, typeText, type BridgeRequest } from './bridge.js';
+import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fitsResponse, inspectCocosPage, networkProfileNames, keyPattern, pressKey, runBridge, typeText, type BridgeRequest } from './bridge.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 // Agents send "" for unused optional fields; treat it as omitted.
@@ -307,6 +307,18 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       inputSchema: obj({ pageUrl, ...target, text: z.string().max(2_000), submit: z.boolean().optional() }).refine(oneTarget, oneTargetMessage),
       annotations: realInput,
     }, input => withNode(input, (page, uuid) => (web ? typeText : nativeTypeText)(page, uuid, input.text, input.submit ?? false)));
+
+    server.registerTool('cocos_press_key', {
+      description: 'Press and release one key with real keyboard input, for game keyboard handlers and focused inputs: Enter, Escape, Tab, Backspace, Delete, Space, arrows, Home, End, PageUp, PageDown, a letter, or a digit. To fill an EditBox use cocos_type_text. Handlers may call game servers.',
+      inputSchema: obj({ pageUrl, key: z.string().regex(keyPattern, 'Use Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, or one letter or digit') }),
+      annotations: realInput,
+    }, async input => {
+      try {
+        return response(await (web ? pressKey : nativePressKey)(await browser.page(input.pageUrl), input.key));
+      } catch (error) {
+        return failure(error);
+      }
+    });
 
     if (web) server.registerTool('cocos_analyze_batches', {
       description: 'Capture the 2D draw batches of the next rendered frame: the node that starts each batch and why the previous batch broke (TEXTURE, MATERIAL, MASK, STENCIL, LAYER, BUFFER, MODEL, MIDDLEWARE, ...). Wraps engine batcher methods for that one frame only; the game must be running. tintMs overlays each batch\'s nodes in its own color for that long.',

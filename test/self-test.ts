@@ -705,12 +705,13 @@ test('MCP exposes opted-in node active mutation with strict input', async () => 
         openWorldHint: false,
       });
     }
-    for (const name of ['cocos_click_node', 'cocos_drag_node', 'cocos_type_text']) {
+    for (const name of ['cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_press_key']) {
       assert.deepEqual(tools.tools.find(tool => tool.name === name)?.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }, name);
     }
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_analyze_batches')?.annotations?.idempotentHint, false);
     assert.equal((await client.callTool({ name: 'cocos_drag_node', arguments: { uuid: 'x', dx: 0, dy: 0 } })).isError, true);
     assert.equal((await client.callTool({ name: 'cocos_type_text', arguments: { uuid: 'x', text: 'x'.repeat(2_001) } })).isError, true);
+    for (const key of ['', 'ab', 'F13', 'Ctrl+A', ';']) assert.equal((await client.callTool({ name: 'cocos_press_key', arguments: { key } })).isError, true, key);
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_step_frame')?.annotations?.idempotentHint, false);
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_show_stats')?.annotations?.idempotentHint, true);
     assert.equal(tools.tools.find(tool => tool.name === 'cocos_set_time_scale')?.annotations?.idempotentHint, true);
@@ -823,7 +824,7 @@ test('MCP in native mode omits tools that need a browser page', async () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     const names = (await client.listTools()).tools.map(tool => tool.name);
     for (const name of ['cocos_emulate_device', 'cocos_analyze_batches', 'cocos_highlight_node', 'cocos_get_selection', 'cocos_step_frame']) assert.equal(names.includes(name), false, name);
-    for (const name of ['cocos_capture_node', 'cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_console_messages', 'cocos_network_requests', 'cocos_network_request', 'cocos_storage']) assert.ok(names.includes(name), name);
+    for (const name of ['cocos_capture_node', 'cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_press_key', 'cocos_console_messages', 'cocos_network_requests', 'cocos_network_request', 'cocos_storage']) assert.ok(names.includes(name), name);
   } finally {
     await Promise.allSettled([client.close(), server.close(), native.close()]);
   }
