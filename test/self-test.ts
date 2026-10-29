@@ -801,6 +801,25 @@ test('MCP registers cocos_call_method only with --allow-method-call', async () =
   }
 });
 
+test('cocos_call_method accepts large integer arguments such as layer bitmasks', async () => {
+  const seen: unknown[] = [];
+  const page: any = { url: () => 'http://localhost:3000', evaluate: async (_fn: unknown, request: any) => { seen.push(request.args); return { result: { value: null } }; } };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowMethodCall: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const call = (args: unknown[]) => client.callTool({ name: 'cocos_call_method', arguments: { uuid: 'x', method: 'setLayer', args } }) as Promise<any>;
+    assert.equal((await call([33_554_432])).isError, undefined, 'a layer bitmask is a valid argument');
+    assert.equal((await call([-2_147_483_648, 4_294_967_295, 1e15])).isError, undefined);
+    assert.deepEqual(seen, [[33_554_432], [-2_147_483_648, 4_294_967_295, 1e15]]);
+    // JSON cannot carry NaN or Infinity; 1e999 parses to Infinity and must still be refused.
+    assert.equal((await client.callTool({ name: 'cocos_call_method', arguments: { uuid: 'x', method: 'f', args: [Number.POSITIVE_INFINITY] } })).isError, true);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
 test('native connection evaluates self-contained bridge source on the loopback inspector only', async () => {
   const realFetch = globalThis.fetch;
   const evaluated: Array<{ url: string; expression: string }> = [];

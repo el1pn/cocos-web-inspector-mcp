@@ -2,6 +2,12 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Fixed
+
+- `cocos_call_method` accepts any finite number as an argument; the shared `+-1000000` bound rejected bitmasks such as node layers (`1 << 25`).
+
 ## 2.4.0
 
 ### Added

@@ -441,7 +441,8 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
   }, input => execute({ action: 'assetReport', type: input.type, unusedOnly: input.unusedOnly, limit: input.limit }, input.pageUrl));
 
   if (options.allowMethodCall) {
-    const jsonValue: z.ZodType<unknown> = z.lazy(() => z.union([z.null(), z.boolean(), finiteNumber, z.string().max(10_000), z.array(jsonValue).max(100), z.record(z.string().max(200), jsonValue)]));
+    // Not finiteNumber: method arguments include bitmasks such as node layers (1 << 25), which that +-1e6 transform bound rejects.
+    const jsonValue: z.ZodType<unknown> = z.lazy(() => z.union([z.null(), z.boolean(), z.number().finite(), z.string().max(10_000), z.array(jsonValue).max(100), z.record(z.string().max(200), jsonValue)]));
     server.registerTool('cocos_call_method', {
       description: 'Call one public method on a Cocos node or component selected by UUID, with JSON arguments; {"$node": uuid}, {"$path": path}, {"$component": uuid}, and {"$asset": uuid} pass live objects. Runs arbitrary game code: it can change state, reach servers, or spend currency. Returns the bounded result or the thrown error; awaitMs waits for a returned promise.',
       inputSchema: obj({ pageUrl, ...target, componentUuid: blank(z.string().min(1)), method: z.string().min(1).max(200).regex(/^[A-Za-z$][\w$]*$/), args: z.array(jsonValue).max(20).optional(), awaitMs: z.number().int().min(0).max(30_000).optional(), maxDepth: z.number().int().min(0).max(6).optional() }).refine(oneTarget, oneTargetMessage),
