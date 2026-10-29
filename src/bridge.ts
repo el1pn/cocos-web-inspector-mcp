@@ -1749,7 +1749,9 @@ export function inspectCocos(request: BridgeRequest): unknown {
     }
     const size = sizeOf(target);
     if (size && (size.width === 0 || size.height === 0)) add(reasons, 'ZERO_SIZE', target, `${size.width}x${size.height}`);
-    const layer = Number(dataProperty(target, '_layer'));
+    // Native (JSB) nodes keep _layer in C++ behind an accessor that data reads skip; fall back to the public layer getter, which returns a plain bitmask.
+    const layerData = dataProperty(target, '_layer');
+    const layer = Number(typeof layerData === 'number' ? layerData : target.layer);
     const cameras: Array<{ node: string; visibility: number }> = [];
     walk(node => {
       for (const component of components(node)) {

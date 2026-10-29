@@ -153,6 +153,21 @@ test('browser connection clears a failed pending connect for retry', async () =>
   await connection.close();
 });
 
+test('explain visibility reads a native node layer behind an accessor', () => withFakeCocos(() => {
+  const cc = (globalThis as any).cc;
+  class Camera { enabled = true; _visibility = 0b0100; }
+  const camera = new Camera();
+  (camera.constructor as any).__classname__ = 'cc.Camera';
+  // Native nodes keep _layer in C++: an accessor on the prototype, so a data-property read finds nothing.
+  class NativeNode { get layer() { return 0b0001; } }
+  const node: any = Object.assign(new NativeNode(), { uuid: 'native-1', name: 'Native', active: true, activeInHierarchy: true, children: [], components: [] });
+  const scene = cc.director.getScene();
+  scene.children.push({ uuid: 'cam-node', name: 'Cam', active: true, activeInHierarchy: true, children: [], components: [camera] }, node);
+  const report = inspectCocos({ action: 'explainVisibility', uuid: 'native-1' }) as any;
+  assert.equal(report.layer, 1, JSON.stringify(report));
+  assert.ok(report.reasons.some((reason: { code: string }) => reason.code === 'LAYER_NOT_RENDERED'), JSON.stringify(report));
+}));
+
 test('bridge traverses, finds, and lists fake Cocos data', () => withFakeCocos(() => {
   const tree = inspectCocos({ action: 'sceneTree', maxDepth: 5, maxNodes: 10 }) as any;
   assert.equal(tree.version, '3.8.7');

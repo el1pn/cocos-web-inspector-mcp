@@ -379,7 +379,7 @@ It registers only with `--allow-method-call`, separate from the mutation and bro
 - `cocos_animation_report` (read-only): what animates now.
 - `cocos_frame_profile` (read-only): frame time percentiles and spikes from real frames.
 - `cocos_event_trace` (debugger mode): bounded `Node.prototype.emit` counts per event and node.
-- Verified on an Android emulator debug build; native lacks the layer check and draw statistics.
+- Verified on an Android emulator debug build; native lacks draw statistics.
 
 ## Not planned: scripted flows
 
