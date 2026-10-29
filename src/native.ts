@@ -229,9 +229,12 @@ export async function nativeConsoleMessages(page: Page, options: { types?: strin
   };
 }
 
-const androidKeys: Record<string, string> = { Enter: 'KEYCODE_ENTER', Escape: 'KEYCODE_ESCAPE', Tab: 'KEYCODE_TAB', Backspace: 'KEYCODE_DEL', Delete: 'KEYCODE_FORWARD_DEL', Space: 'KEYCODE_SPACE', ArrowUp: 'KEYCODE_DPAD_UP', ArrowDown: 'KEYCODE_DPAD_DOWN', ArrowLeft: 'KEYCODE_DPAD_LEFT', ArrowRight: 'KEYCODE_DPAD_RIGHT', Home: 'KEYCODE_MOVE_HOME', End: 'KEYCODE_MOVE_END', PageUp: 'KEYCODE_PAGE_UP', PageDown: 'KEYCODE_PAGE_DOWN' };
+const androidKeys: Record<string, string> = { Enter: 'KEYCODE_ENTER', Escape: 'KEYCODE_ESCAPE', Tab: 'KEYCODE_TAB', Delete: 'KEYCODE_DEL', Space: 'KEYCODE_SPACE', ArrowUp: 'KEYCODE_DPAD_UP', ArrowDown: 'KEYCODE_DPAD_DOWN', ArrowLeft: 'KEYCODE_DPAD_LEFT', ArrowRight: 'KEYCODE_DPAD_RIGHT', Home: 'KEYCODE_MOVE_HOME', End: 'KEYCODE_MOVE_END', PageUp: 'KEYCODE_PAGE_UP', PageDown: 'KEYCODE_PAGE_DOWN' };
 
+// The native engine reports AKEYCODE_DEL (the physical Backspace key) as Delete, has no entry for FORWARD_DEL, and reports Backspace only for
+// AKEYCODE_BACK, which leaves the app. So Delete maps to DEL and Backspace is refused rather than sent as a key the game would misread.
 export async function nativePressKey(_page: Page, key: string): Promise<unknown> {
+  if (key === 'Backspace') throw new Error('Invalid mutation: native builds deliver Backspace only for the system Back key, which leaves the app; use Delete, which the engine reports for the device Backspace key');
   // Only validated key names reach adb, never free text.
   await adb(['shell', 'input', 'keyevent', androidKeys[key] ?? `KEYCODE_${key.toUpperCase()}`]);
   await settle();
