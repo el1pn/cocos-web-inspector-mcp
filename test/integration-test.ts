@@ -736,6 +736,10 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     // Method calls: engine methods on real components, game-style methods on a runtime component, and live-object arguments.
     const labelNode = (await call(client, 'cocos_find_node', { pageUrl, path: '/InspectorTest/Canvas/Panel/TitleLabel' })).matches[0].uuid as string;
     const labelComponent = (await call(client, 'cocos_get_components', { pageUrl, uuid: labelNode })).components.find((component: { type: string }) => component.type === 'Label').uuid as string;
+    const labelTransform = (await call(client, 'cocos_get_components', { pageUrl, uuid: labelNode })).components.find((component: { type: string }) => component.type === 'UITransform').uuid as string;
+    const converted = await call(client, 'cocos_call_method', { pageUrl, uuid: labelNode, componentUuid: labelTransform, method: 'convertToWorldSpaceAR', args: [{ x: 33_554_432, y: 0, z: 0 }] });
+    assert.equal(converted.called, true);
+    assert.ok(Number.isFinite(converted.result.value.x) && Math.abs(converted.result.value.x) > 1_000_000, JSON.stringify(converted));
     const named = await call(client, 'cocos_call_method', { pageUrl, uuid: labelNode, method: 'getChildByName', args: ['missing'] });
     assert.deepEqual(named.result, { value: null });
     const sibling = await call(client, 'cocos_call_method', { pageUrl, uuid: labelNode, method: 'getSiblingIndex' });
