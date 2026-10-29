@@ -364,10 +364,18 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.deepEqual(secret.after, { redacted: true }, JSON.stringify(secret));
     assert.equal(JSON.stringify(await call(client, 'cocos_get_properties', { pageUrl, uuid: passwordUuid, componentType: 'EditBox', maxDepth: 0 })).includes('hunter2'), false);
     assert.equal((await client.callTool({ name: 'cocos_type_text', arguments: { pageUrl, uuid: panelUuid, text: 'x' } })).isError, true, 'type_text needs an EditBox');
-    await page.evaluate(() => { (globalThis as any).__keys = []; document.addEventListener('keydown', event => (globalThis as any).__keys.push(event.key)); });
+    await page.evaluate(() => {
+      // Capture phase: the engine stops propagation on the canvas.
+      (globalThis as any).__keys = [];
+      document.addEventListener('keydown', event => (globalThis as any).__keys.push(event.key), true);
+      const { cc } = globalThis as any;
+      (globalThis as any).__engineKeys = [];
+      cc.systemEvent.on(cc.SystemEventType.KEY_DOWN, (event: any) => (globalThis as any).__engineKeys.push(event.keyCode));
+    });
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     assert.equal((await call(client, 'cocos_press_key', { pageUrl, key: 'ArrowLeft' })).pressed, true);
     assert.deepEqual(await page.evaluate(() => (globalThis as any).__keys), ['ArrowLeft'], 'press_key must dispatch a real keydown');
+    assert.deepEqual(await page.evaluate(() => (globalThis as any).__engineKeys), [37], 'engine systemEvent must receive KEY_DOWN for ArrowLeft');
     const scrollY = () => page.evaluate(uuid => {
       const { cc } = globalThis as any;
       let found: any;

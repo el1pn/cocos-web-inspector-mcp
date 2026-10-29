@@ -154,7 +154,17 @@ export const namedKeys = ['Enter', 'Escape', 'Tab', 'Backspace', 'Delete', 'Spac
 export const keyPattern = new RegExp(`^(?:${namedKeys.join('|')}|[a-zA-Z0-9])$`);
 
 // Real keydown/keyup for game keyboard handlers (cc.Input KEY_DOWN/KEY_UP); cocos_type_text is the path for EditBox text.
+// The engine listens for keys on the GameCanvas element, so focus it first unless a DOM input (an open EditBox) already has focus.
 export async function pressKey(page: Page, key: string): Promise<unknown> {
+  await page.evaluate(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
+    const canvas = document.getElementById('GameCanvas');
+    if (canvas) {
+      if (!canvas.hasAttribute('tabindex')) canvas.tabIndex = -1;
+      canvas.focus();
+    }
+  });
   await page.keyboard.press(key === 'Space' ? ' ' : key);
   return { pressed: true, key, runtimeOnly: true };
 }
