@@ -637,6 +637,86 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     });
     assert.equal(drawGroup(await call(client, 'cocos_listener_report', { pageUrl })), drawGroup(listenersBefore));
 
+    // Visibility: each definite reason is provoked on a throwaway node, then the node is destroyed.
+    const visibilityPath = '/InspectorTest/Canvas/Panel/TitleLabel';
+    const shown = await call(client, 'cocos_explain_visibility', { pageUrl, path: visibilityPath });
+    assert.equal(shown.visible, true, JSON.stringify(shown));
+    const codes = (report: Record<string, any>) => (report.reasons as Array<{ code: string }>).map(reason => reason.code);
+    await page.evaluate(() => { const node = (globalThis as any).cc.director.getScene().getChildByName('Canvas').getChildByName('Panel').getChildByName('TitleLabel'); node.setScale(0, 1, 1); });
+    assert.ok(codes(await call(client, 'cocos_explain_visibility', { pageUrl, path: visibilityPath })).includes('ZERO_SCALE'));
+    await page.evaluate(() => { const node = (globalThis as any).cc.director.getScene().getChildByName('Canvas').getChildByName('Panel').getChildByName('TitleLabel'); node.setScale(1, 1, 1); node.active = false; });
+    assert.ok(codes(await call(client, 'cocos_explain_visibility', { pageUrl, path: visibilityPath })).includes('INACTIVE'));
+    await page.evaluate(() => { const node = (globalThis as any).cc.director.getScene().getChildByName('Canvas').getChildByName('Panel').getChildByName('TitleLabel'); node.active = true; node.layer = 1 << 3; });
+    assert.ok(codes(await call(client, 'cocos_explain_visibility', { pageUrl, path: visibilityPath })).includes('LAYER_NOT_RENDERED'));
+    await page.evaluate(() => { const node = (globalThis as any).cc.director.getScene().getChildByName('Canvas').getChildByName('Panel').getChildByName('TitleLabel'); node.layer = (globalThis as any).cc.director.getScene().getChildByName('Canvas').layer; });
+    assert.equal((await call(client, 'cocos_explain_visibility', { pageUrl, path: visibilityPath })).visible, true, 'restored node is visible again');
+
+    // Layout: a Widget stretching both edges and a parent Layout are both named.
+    const layoutBefore = await call(client, 'cocos_explain_layout', { pageUrl, path: visibilityPath });
+    assert.equal(layoutBefore.target.name, 'TitleLabel');
+    assert.ok(Array.isArray(layoutBefore.explanations));
+    await page.evaluate(() => {
+      const { cc } = globalThis as any;
+      const host = new cc.Node('LayoutHost');
+      host.layer = cc.director.getScene().getChildByName('Canvas').layer;
+      host.addComponent('cc.UITransform').setContentSize(300, 100);
+      const layout = host.addComponent('cc.Layout');
+      layout.type = cc.Layout.Type.HORIZONTAL;
+      layout.spacingX = 12;
+      const child = new cc.Node('LayoutChild');
+      child.layer = host.layer;
+      child.addComponent('cc.UITransform').setContentSize(40, 40);
+      const widget = child.addComponent('cc.Widget');
+      widget.isAlignLeft = true;
+      widget.isAlignRight = true;
+      host.addChild(child);
+      cc.director.getScene().getChildByName('Canvas').addChild(host);
+    });
+    const explained = await call(client, 'cocos_explain_layout', { pageUrl, path: '/InspectorTest/Canvas/LayoutHost/LayoutChild' });
+    const layoutCodes = explained.explanations.map((item: { code: string }) => item.code);
+    assert.ok(layoutCodes.includes('LAYOUT_CONTROLS_POSITION'), JSON.stringify(explained));
+    assert.ok(layoutCodes.includes('WIDGET_STRETCHES_WIDTH'), JSON.stringify(explained));
+    assert.equal(explained.parentLayout.type, 'HORIZONTAL');
+    assert.equal(explained.parentLayout.spacingX, 12);
+    assert.deepEqual(Object.keys(explained.widget.edges).sort(), ['left', 'right']);
+    await page.evaluate(() => (globalThis as any).cc.director.getScene().getChildByName('Canvas').getChildByName('LayoutHost').destroy());
+
+    // Animation report: a tween target appears while its tween runs.
+    const tweenTarget = await page.evaluate(() => {
+      const { cc } = globalThis as any;
+      const node = new cc.Node('TweenProbe');
+      cc.director.getScene().getChildByName('Canvas').addChild(node);
+      cc.tween(node).to(30, { scale: new cc.Vec3(2, 2, 2) }).start();
+      return node.uuid as string;
+    });
+    const animations = await call(client, 'cocos_animation_report', { pageUrl });
+    assert.ok(animations.tweens.some((tween: { target: { uuid?: string } }) => tween.target.uuid === tweenTarget), JSON.stringify(animations.tweens));
+    assert.ok(animations.counts.tweenActions >= 1);
+    await page.evaluate(() => (globalThis as any).cc.director.getScene().getChildByName('Canvas').getChildByName('TweenProbe').destroy());
+
+    // Frame profile samples real frames.
+    const profile = await call(client, 'cocos_frame_profile', { pageUrl, frames: 20, timeoutMs: 8_000 });
+    assert.ok(profile.sampled >= 5, JSON.stringify(profile));
+    assert.ok(profile.frameMs.max >= profile.frameMs.p50 && profile.frameMs.p50 > 0, JSON.stringify(profile));
+
+    // Event trace counts a known storm, then restores Node.prototype.emit exactly.
+    const emitBefore = await page.evaluate(() => Object.prototype.hasOwnProperty.call((globalThis as any).cc.Node.prototype, 'emit'));
+    await page.evaluate(() => {
+      const { cc } = globalThis as any;
+      const node = new cc.Node('Stormy');
+      cc.director.getScene().getChildByName('Canvas').addChild(node);
+      (globalThis as any).__storm = setInterval(() => node.emit('probe-storm'), 10);
+    });
+    const trace = await call(client, 'cocos_event_trace', { pageUrl, durationMs: 600 });
+    const storm = trace.byEvent.find((item: { event: string }) => item.event === 'probe-storm');
+    assert.ok(storm && storm.count >= 5, JSON.stringify(trace.byEvent));
+    assert.equal(trace.top.find((item: { event: string }) => item.event === 'probe-storm').node, 'Stormy');
+    await page.evaluate(() => {
+      clearInterval((globalThis as any).__storm);
+      (globalThis as any).cc.director.getScene().getChildByName('Canvas').getChildByName('Stormy').destroy();
+    });
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call((globalThis as any).cc.Node.prototype, 'emit')), emitBefore, 'trace restores Node.prototype.emit');
+
     // Time scale multiplies every frame's dt.
     assert.deepEqual((await call(client, 'cocos_set_time_scale', { pageUrl })).after, { scale: 1 });
     const scaledTicks = async () => page.evaluate(() => new Promise<number>(resolve => {

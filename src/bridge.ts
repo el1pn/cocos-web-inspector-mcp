@@ -25,6 +25,11 @@ export type BridgeRequest =
   | { action: 'dynamicAtlas'; limit?: number | undefined }
   | { action: 'explainClick'; uuid?: string | undefined; x?: number | undefined; y?: number | undefined }
   | { action: 'listenerReport'; limit?: number | undefined }
+  | { action: 'explainVisibility'; uuid: string }
+  | { action: 'explainLayout'; uuid: string }
+  | { action: 'animationReport'; limit?: number | undefined }
+  | { action: 'frameProfile'; frames?: number | undefined; timeoutMs?: number | undefined }
+  | { action: 'eventTrace'; durationMs?: number | undefined; limit?: number | undefined }
   | { action: 'timeScale'; scale?: number | undefined }
   | { action: 'callMethod'; uuid: string; componentUuid?: string | undefined; method: string; args: MethodArgument[]; awaitMs?: number | undefined; maxDepth?: number | undefined }
   | { action: 'assetReport'; type?: string | undefined; unusedOnly?: boolean | undefined; limit?: number | undefined };
@@ -307,6 +312,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
     __cocosWebInspectorBatchOverlay?: HTMLElement | undefined;
     __cocosWebInspectorBatchTimer?: ReturnType<typeof setTimeout>;
     __cocosWebInspectorTimeScale?: { scale: number; original: (dt: number) => void; own: boolean } | undefined;
+    __cocosWebInspectorEventTrace?: boolean | undefined;
+    performance?: { now(): number };
   };
   // Browsers always report a protocol; only the Cocos native (jsb) location shim has an empty one, and its endpoint was already checked to be loopback.
   if (root.location && root.location.protocol !== '') {
@@ -1686,6 +1693,333 @@ export function inspectCocos(request: BridgeRequest): unknown {
       truncated: items.length > limit || total > 50_000 || sceneTruncated,
       truncationReasons: [...(items.length > limit || total > 50_000 ? ['NODE_LIMIT'] : []), ...(sceneTruncated ? ['NODE_LIMIT'] : [])].filter((value, index, all) => all.indexOf(value) === index),
     };
+  }
+
+
+  const pathOf = (node: any): string => {
+    const names: string[] = [];
+    for (let current = node, depth = 0; current && depth < 100; current = current.parent, depth++) names.unshift(String(current.name ?? '').slice(0, 200));
+    return `/${names.join('/')}`;
+  };
+  const chainOf = (node: any): any[] => {
+    const chain: any[] = [];
+    for (let current = node, depth = 0; current && depth < 100; current = current.parent, depth++) chain.push(current);
+    return chain;
+  };
+  const finiteOr = (value: unknown, fallback = 0): number => Number.isFinite(Number(value)) ? Number(value) : fallback;
+  const sizeOf = (node: any): { width: number; height: number; anchor?: { x: number; y: number } } | undefined => {
+    const transform = components(node).find(component => componentName(component) === 'UITransform');
+    const size = transform && dataProperty(transform, '_contentSize');
+    const anchor = transform && dataProperty(transform, '_anchorPoint');
+    return size ? { width: finiteOr(size.width), height: finiteOr(size.height), ...(anchor ? { anchor: { x: finiteOr(anchor.x), y: finiteOr(anchor.y) } } : {}) } : undefined;
+  };
+
+  if (request.action === 'explainVisibility') {
+    // Reads backing fields (_active, _layer, _color, _opacity, _visibility) so no getter runs; mirrors what the renderer checks, without rendering.
+    const target = findByUuid(request.uuid);
+    const chain = chainOf(target);
+    const reasons: Array<Record<string, unknown>> = [];
+    const warnings: Array<Record<string, unknown>> = [];
+    const add = (list: Array<Record<string, unknown>>, code: string, node?: any, detail?: string) => list.push({ code, ...(node ? { node: String(node.name ?? '').slice(0, 200), nodeUuid: String(node.uuid ?? '') } : {}), ...(detail ? { detail } : {}) });
+    if (target.activeInHierarchy === false) {
+      const off = chain.find(node => dataProperty(node, '_active') === false) ?? target;
+      add(reasons, 'INACTIVE', off, off === target ? 'the node itself is inactive' : 'an ancestor is inactive');
+    }
+    const rendererTypes = ['Sprite', 'Label', 'RichText', 'Graphics', 'Skeleton', 'ArmatureDisplay', 'MeshRenderer', 'SkinnedMeshRenderer', 'ParticleSystem2D', 'ParticleSystem', 'TiledMap', 'MotionStreak', 'UIMeshRenderer', 'VideoPlayer', 'WebView'];
+    const renderers = components(target).filter(component => rendererTypes.includes(componentName(component)));
+    if (!renderers.length) add(warnings, 'NO_RENDERER', target, 'no Sprite, Label, Graphics, or other renderer component on this node; it draws nothing itself');
+    for (const renderer of renderers) {
+      const type = componentName(renderer);
+      if (dataProperty(renderer, '_enabled') === false) add(reasons, 'RENDERER_DISABLED', target, type);
+      if (type === 'Sprite' && !dataProperty(renderer, '_spriteFrame')) add(reasons, 'NO_SPRITE_FRAME', target, 'Sprite has no spriteFrame');
+      if (type === 'Label' && dataProperty(renderer, '_string') === '') add(reasons, 'EMPTY_TEXT', target, 'Label string is empty');
+      const color = dataProperty(renderer, '_color');
+      if (color && finiteOr(color.a, 255) === 0) add(reasons, 'TRANSPARENT_COLOR', target, `${type} color alpha is 0`);
+    }
+    let opacity = 1;
+    for (const node of chain) {
+      const ui = components(node).find(component => componentName(component) === 'UIOpacity');
+      const value = ui ? dataProperty(ui, '_opacity') : undefined;
+      if (typeof value === 'number') {
+        opacity *= value / 255;
+        if (value === 0) add(reasons, 'ZERO_OPACITY', node, 'UIOpacity is 0');
+      }
+      const scale = dataProperty(node, '_lscale');
+      if (scale && (finiteOr(scale.x, 1) === 0 || finiteOr(scale.y, 1) === 0)) add(reasons, 'ZERO_SCALE', node, 'local scale x or y is 0');
+    }
+    const size = sizeOf(target);
+    if (size && (size.width === 0 || size.height === 0)) add(reasons, 'ZERO_SIZE', target, `${size.width}x${size.height}`);
+    const layer = Number(dataProperty(target, '_layer'));
+    const cameras: Array<{ node: string; visibility: number }> = [];
+    walk(node => {
+      for (const component of components(node)) {
+        if (componentName(component) === 'Camera' && dataProperty(component, '_enabled') !== false && node.activeInHierarchy !== false) cameras.push({ node: String(node.name ?? '').slice(0, 200), visibility: finiteOr(dataProperty(component, '_visibility')) });
+      }
+    });
+    if (Number.isFinite(layer) && cameras.length) {
+      if (!cameras.some(camera => (camera.visibility & layer) !== 0)) add(reasons, 'LAYER_NOT_RENDERED', target, `node layer ${layer} is outside every active camera's visibility (${cameras.slice(0, 5).map(camera => `${camera.node}: ${camera.visibility}`).join(', ')})`);
+    } else if (!cameras.length) add(warnings, 'NO_ACTIVE_CAMERA', undefined, 'no active Camera found; cannot check layer visibility');
+    const bounds = nodeBounds(target);
+    if (bounds.available && bounds.outsideViewport) add(reasons, 'OUTSIDE_VIEWPORT', target);
+    if (bounds.available) {
+      for (const ancestor of chain.slice(1)) {
+        const mask = components(ancestor).find(component => componentName(component) === 'Mask' && dataProperty(component, '_enabled') !== false);
+        if (!mask) continue;
+        const maskBounds = nodeBounds(ancestor);
+        if (!maskBounds.available) continue;
+        const a = bounds.viewport;
+        const b = maskBounds.viewport;
+        if (a.x >= b.x + b.width || b.x >= a.x + a.width || a.y >= b.y + b.height || b.y >= a.y + a.height) add(reasons, 'CLIPPED_BY_MASK', ancestor, 'the node lies entirely outside this Mask\'s box');
+      }
+      // ponytail: covering is judged by an opaque Sprite's box only; texture transparency and camera priority are ignored. Upgrade: sample the framebuffer.
+      if (!bounds.outsideViewport && target.activeInHierarchy !== false) {
+        const clip = bounds.clippedViewport;
+        let after = false;
+        let checked = 0;
+        const covering: Array<Record<string, unknown>> = [];
+        walk(node => {
+          if (node === target) { after = true; return; }
+          if (!after || checked >= 500 || covering.length >= 3 || node.activeInHierarchy === false || chainOf(node).includes(target)) return;
+          const sprite = components(node).find(component => componentName(component) === 'Sprite' && dataProperty(component, '_enabled') !== false && dataProperty(component, '_spriteFrame'));
+          const color = sprite && dataProperty(sprite, '_color');
+          if (!sprite || !color || finiteOr(color.a, 255) < 255) return;
+          checked++;
+          const other = nodeBounds(node);
+          if (other.available && other.viewport.x <= clip.x && other.viewport.y <= clip.y && other.viewport.x + other.viewport.width >= clip.x + clip.width && other.viewport.y + other.viewport.height >= clip.y + clip.height) covering.push({ uuid: String(node.uuid ?? ''), name: String(node.name ?? '').slice(0, 200), path: pathOf(node) });
+        });
+        if (covering.length) warnings.push({ code: 'POSSIBLY_COVERED', detail: 'an opaque Sprite drawn later fully contains this node\'s box', coveredBy: covering });
+      }
+    }
+    return {
+      version,
+      target: summary(target),
+      visible: reasons.length === 0,
+      reasons,
+      warnings,
+      effectiveOpacity: Math.round(opacity * 1000) / 1000,
+      ...(Number.isFinite(layer) ? { layer } : {}),
+      bounds: bounds.available ? { viewport: bounds.viewport, clippedViewport: bounds.clippedViewport } : { reason: bounds.reason },
+    };
+  }
+
+  if (request.action === 'explainLayout') {
+    // Reads Widget, Layout, Label, and Sprite backing fields to say which of them drives this node's size and position.
+    const target = findByUuid(request.uuid);
+    const parent = target.parent;
+    const explanations: Array<Record<string, unknown>> = [];
+    const note = (code: string, detail: string, extra: Record<string, unknown> = {}) => explanations.push({ code, detail, ...extra });
+    const own = components(target);
+    const find = (node: any, type: string) => components(node).find(component => componentName(component) === type);
+    const alignModes = ['ONCE', 'ON_WINDOW_RESIZE', 'ALWAYS'];
+    const widget = find(target, 'Widget');
+    let widgetInfo: Record<string, unknown> | undefined;
+    if (widget) {
+      const flags = finiteOr(dataProperty(widget, '_alignFlags'));
+      const edge = (flag: number, field: string, abs: string) => flags & flag ? { value: finiteOr(dataProperty(widget, field)), unit: dataProperty(widget, abs) === false ? 'percent' : 'px' } : undefined;
+      const edges = { top: edge(1, '_top', '_isAbsTop'), bottom: edge(4, '_bottom', '_isAbsBottom'), left: edge(8, '_left', '_isAbsLeft'), right: edge(32, '_right', '_isAbsRight'), horizontalCenter: edge(16, '_horizontalCenter', '_isAbsHorizontalCenter'), verticalCenter: edge(2, '_verticalCenter', '_isAbsVerticalCenter') };
+      const alignMode = alignModes[finiteOr(dataProperty(widget, '_alignMode'), -1)] ?? 'UNKNOWN';
+      const reference = dataProperty(widget, '_target');
+      widgetInfo = { enabled: dataProperty(widget, '_enabled') !== false, alignMode, ...(reference ? { target: { uuid: String(reference.uuid ?? ''), name: String(reference.name ?? '').slice(0, 200) } } : {}), edges: Object.fromEntries(Object.entries(edges).filter(([, value]) => value)) };
+      if (dataProperty(widget, '_enabled') === false) note('WIDGET_DISABLED', 'Widget is disabled, so it does not constrain this node');
+      else {
+        if (flags & 8 && flags & 32) note('WIDGET_STRETCHES_WIDTH', 'left and right edges are both aligned, so the width is the reference width minus both offsets');
+        if (flags & 1 && flags & 4) note('WIDGET_STRETCHES_HEIGHT', 'top and bottom edges are both aligned, so the height is the reference height minus both offsets');
+        if (flags & 15 && !(flags & 8 && flags & 32) || flags & 63) note('WIDGET_SETS_POSITION', 'Widget positions the node against ' + (reference ? 'its target' : 'its parent') + ' edges');
+        if (alignMode === 'ONCE') note('WIDGET_ALIGN_ONCE', 'alignMode ONCE aligns when enabled and not again, so a later resize or parent change leaves the node where it was');
+      }
+    }
+    const parentLayout = parent ? find(parent, 'Layout') : undefined;
+    const layoutTypes = ['NONE', 'HORIZONTAL', 'VERTICAL', 'GRID'];
+    const resizeModes = ['NONE', 'CONTAINER', 'CHILDREN'];
+    const describeLayout = (layout: any) => ({ type: layoutTypes[finiteOr(dataProperty(layout, '_layoutType'), -1)] ?? 'UNKNOWN', resizeMode: resizeModes[finiteOr(dataProperty(layout, '_resizeMode'), -1)] ?? 'UNKNOWN', spacingX: finiteOr(dataProperty(layout, '_spacingX')), spacingY: finiteOr(dataProperty(layout, '_spacingY')), padding: { left: finiteOr(dataProperty(layout, '_paddingLeft')), right: finiteOr(dataProperty(layout, '_paddingRight')), top: finiteOr(dataProperty(layout, '_paddingTop')), bottom: finiteOr(dataProperty(layout, '_paddingBottom')) }, affectedByScale: dataProperty(layout, '_affectedByScale') === true, enabled: dataProperty(layout, '_enabled') !== false });
+    let parentLayoutInfo: Record<string, unknown> | undefined;
+    if (parentLayout) {
+      parentLayoutInfo = describeLayout(parentLayout);
+      if (parentLayoutInfo.enabled && parentLayoutInfo.type !== 'NONE') note('LAYOUT_CONTROLS_POSITION', `the parent's ${parentLayoutInfo.type} Layout places its children; a manual position is overwritten the next time it updates`);
+      if (parentLayoutInfo.enabled && parentLayoutInfo.resizeMode === 'CHILDREN') note('LAYOUT_CONTROLS_SIZE', 'the parent Layout resizes its children');
+    }
+    const ownLayout = find(target, 'Layout');
+    let ownLayoutInfo: Record<string, unknown> | undefined;
+    if (ownLayout) {
+      ownLayoutInfo = describeLayout(ownLayout);
+      if (ownLayoutInfo.enabled && ownLayoutInfo.resizeMode === 'CONTAINER') note('LAYOUT_FITS_CONTAINER_TO_CHILDREN', 'resizeMode CONTAINER sizes this node to fit its children');
+    }
+    const label = find(target, 'Label');
+    if (label && [0, 3].includes(finiteOr(dataProperty(label, '_overflow'), -1))) note('LABEL_CONTROLS_SIZE', `Label overflow ${finiteOr(dataProperty(label, '_overflow')) === 0 ? 'NONE' : 'RESIZE_HEIGHT'} sets the size from its text`);
+    const sprite = find(target, 'Sprite');
+    if (sprite && finiteOr(dataProperty(sprite, '_sizeMode'), 0) !== 0) note('SPRITE_CONTROLS_SIZE', `Sprite sizeMode ${finiteOr(dataProperty(sprite, '_sizeMode')) === 1 ? 'TRIMMED' : 'RAW'} takes the size from its spriteFrame`);
+    let ancestorScale = { x: 1, y: 1 };
+    for (const node of chainOf(target).slice(1)) {
+      const scale = dataProperty(node, '_lscale');
+      if (scale) ancestorScale = { x: ancestorScale.x * finiteOr(scale.x, 1), y: ancestorScale.y * finiteOr(scale.y, 1) };
+    }
+    if (ancestorScale.x !== 1 || ancestorScale.y !== 1) note('SCALED_BY_ANCESTOR', `ancestors scale this node by ${Math.round(ancestorScale.x * 1000) / 1000} x ${Math.round(ancestorScale.y * 1000) / 1000}`);
+    if (!find(target, 'UITransform')) note('NO_UI_TRANSFORM', 'the node has no UITransform, so it has no size, anchor, or Widget/Layout participation');
+    const position = dataProperty(target, '_lpos');
+    const bounds = nodeBounds(target);
+    return {
+      version,
+      target: summary(target),
+      size: sizeOf(target) ?? null,
+      localPosition: position ? { x: finiteOr(position.x), y: finiteOr(position.y), z: finiteOr(position.z) } : null,
+      parent: parent ? { uuid: String(parent.uuid ?? ''), name: String(parent.name ?? '').slice(0, 200), size: sizeOf(parent) ?? null } : null,
+      ...(widgetInfo ? { widget: widgetInfo } : {}),
+      ...(parentLayoutInfo ? { parentLayout: parentLayoutInfo } : {}),
+      ...(ownLayoutInfo ? { layout: ownLayoutInfo } : {}),
+      ancestorScale,
+      explanations,
+      viewport: bounds.available ? bounds.viewport : { reason: bounds.reason },
+      componentTypes: own.slice(0, 50).map(componentName),
+    };
+  }
+
+  if (request.action === 'animationReport') {
+    // Reads Animation states, Spine/DragonBones fields, and the tween manager's hash by data property; nothing is played or stopped.
+    const limit = Math.min(Math.max(request.limit ?? 100, 1), 500);
+    const animations: Array<Record<string, unknown>> = [];
+    let playing = 0;
+    let total = 0;
+    const finiteJson = (value: unknown) => typeof value === 'number' ? (Number.isFinite(value) ? value : String(value)) : value;
+    const traversal = walk((node, path) => {
+      for (const component of components(node)) {
+        const type = componentName(component);
+        if (!['Animation', 'Skeleton', 'ArmatureDisplay'].includes(type)) continue;
+        total++;
+        const base = { uuid: String(node.uuid ?? ''), node: String(node.name ?? '').slice(0, 200), path, type, enabled: dataProperty(component, '_enabled') !== false, activeInHierarchy: node.activeInHierarchy !== false };
+        if (type === 'Animation') {
+          const states = Object.values(dataProperty(component, '_nameToState') ?? {}) as any[];
+          const active = states.filter(state => dataProperty(state, '_isPlaying') === true);
+          playing += active.length;
+          if (animations.length < limit) animations.push({ ...base, stateCount: states.length, playing: active.length, states: states.filter(state => dataProperty(state, '_isPlaying') === true).slice(0, 20).map(state => ({ name: String(dataProperty(state, '_name') ?? '').slice(0, 120), paused: dataProperty(state, '_isPaused') === true, speed: finiteJson(dataProperty(state, '_speed')), wrapMode: dataProperty(state, '_wrapMode'), repeatCount: finiteJson(dataProperty(state, '_repeatCount')), time: finiteJson(dataProperty(state, 'time')) })) });
+        } else {
+          const animation = dataProperty(component, '_animationName');
+          if (animation) playing++;
+          if (animations.length < limit) animations.push({ ...base, animation: animation ? String(animation).slice(0, 120) : null, loop: finiteJson(dataProperty(component, 'loop') ?? dataProperty(component, '_loop')), timeScale: finiteJson(dataProperty(component, '_timeScale')), paused: dataProperty(component, '_paused') === true ? true : undefined });
+        }
+      }
+    });
+    const systems = (dataProperty(cc.director ?? {}, '_systems') ?? []) as any[];
+    const hash = dataProperty(dataProperty(systems.find(system => system && dataProperty(system, 'actionMgr')) ?? {}, 'actionMgr') ?? {}, '_hashTargets');
+    const tweens: Array<Record<string, unknown>> = [];
+    let tweenTotal = 0;
+    let tweenActions = 0;
+    if (hash instanceof Map) {
+      for (const [owner, element] of hash) {
+        const actions = Array.isArray(element?.actions) ? element.actions.length : 0;
+        tweenTotal++;
+        tweenActions += actions;
+        if (tweens.length >= limit) continue;
+        const isNode = !!owner && typeof owner === 'object' && typeof dataProperty(owner, '_id') === 'string';
+        tweens.push({ target: isNode ? { uuid: String(owner.uuid ?? ''), name: String(owner.name ?? '').slice(0, 200), path: pathOf(owner) } : { type: String(dataProperty(owner ?? {}, 'constructor')?.name ?? typeof owner).slice(0, 80) }, actions, paused: element?.paused === true });
+      }
+    }
+    return {
+      version,
+      counts: { animationComponents: total, playingStates: playing, tweenTargets: tweenTotal, tweenActions },
+      animations,
+      tweens,
+      ...(hash instanceof Map ? {} : { unavailableMetrics: { tweens: 'UNSUPPORTED_PUBLIC_API' } }),
+      truncated: traversal.truncated || animations.length >= limit || tweens.length >= limit,
+      truncationReasons: traversal.truncated || animations.length >= limit || tweens.length >= limit ? ['NODE_LIMIT'] : [],
+    };
+  }
+
+  if (request.action === 'frameProfile') {
+    // Measures wall-clock time between consecutive AFTER_DRAW events, so GC pauses and long frames show; reads draw stats the same frame.
+    const wanted = Math.min(Math.max(Math.floor(request.frames ?? 120), 2), 600);
+    const timeoutMs = Math.min(Math.max(request.timeoutMs ?? 10_000, 100), 30_000);
+    const director = cc.director;
+    if (typeof director?.on !== 'function' || typeof director?.off !== 'function' || !cc.Director?.EVENT_AFTER_DRAW) invalidMutation('director events are unavailable');
+    if (typeof director.isPaused === 'function' && director.isPaused()) return { version, sampled: 0, reason: 'DIRECTOR_PAUSED' };
+    const now = () => typeof root.performance?.now === 'function' ? root.performance.now() : Date.now();
+    const renderRoot = dataProperty(director, '_root');
+    const device = renderRoot && typeof renderRoot === 'object' ? dataProperty(renderRoot, '_device') : undefined;
+    const read = (owner: unknown, key: string) => { const value = owner && typeof owner === 'object' ? dataProperty(owner, key) : undefined; return typeof value === 'number' && Number.isFinite(value) ? value : undefined; };
+    const samples: Array<{ ms: number; drawCalls?: number | undefined; triangles?: number | undefined }> = [];
+    return new Promise(resolve => {
+      let last: number | undefined;
+      let finished = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (timedOut: boolean) => {
+        if (finished) return;
+        finished = true;
+        director.off(cc.Director.EVENT_AFTER_DRAW, onFrame);
+        if (timer !== undefined) clearTimeout(timer);
+        const sorted = samples.map(sample => sample.ms).sort((a, b) => a - b);
+        const at = (fraction: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))]! : 0;
+        const round = (value: number) => Math.round(value * 100) / 100;
+        const median = at(0.5);
+        const stat = (key: 'drawCalls' | 'triangles') => { const values = samples.map(sample => sample[key]).filter((value): value is number => value !== undefined); return values.length ? { min: Math.min(...values), avg: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length), max: Math.max(...values) } : undefined; };
+        resolve({
+          version,
+          sampled: samples.length,
+          ...(timedOut ? { timedOut: true } : {}),
+          frameMs: samples.length ? { avg: round(sorted.reduce((sum, value) => sum + value, 0) / sorted.length), p50: round(median), p95: round(at(0.95)), max: round(sorted[sorted.length - 1]!) } : undefined,
+          fps: samples.length && median > 0 ? round(1_000 / median) : undefined,
+          // A spike is a frame over twice the median and over 33 ms: slow enough to be felt, not ordinary jitter.
+          spikes: samples.filter(sample => sample.ms > median * 2 && sample.ms > 33).length,
+          worstFrames: samples.map((sample, index) => ({ index, ms: round(sample.ms) })).sort((a, b) => b.ms - a.ms).slice(0, 5),
+          drawCalls: stat('drawCalls'),
+          triangles: stat('triangles'),
+        });
+      };
+      const onFrame = () => {
+        const at = now();
+        if (last !== undefined) samples.push({ ms: at - last, drawCalls: read(device, '_numDrawCalls'), triangles: read(device, '_numTris') });
+        last = at;
+        if (samples.length >= wanted) finish(false);
+      };
+      director.on(cc.Director.EVENT_AFTER_DRAW, onFrame);
+      timer = setTimeout(() => finish(true), timeoutMs);
+    });
+  }
+
+  if (request.action === 'eventTrace') {
+    // Wraps Node.prototype.emit for a bounded window and counts calls per event and node. Arguments are never recorded; the original runs unchanged.
+    const durationMs = Math.min(Math.max(request.durationMs ?? 2_000, 100), 10_000);
+    const limit = Math.min(Math.max(request.limit ?? 50, 1), 200);
+    if (root.__cocosWebInspectorEventTrace) invalidMutation('an event trace is already running');
+    const proto = cc.Node?.prototype;
+    if (!proto || typeof proto.emit !== 'function') invalidMutation('Node.prototype.emit is unavailable');
+    const original = proto.emit;
+    const hadOwn = Object.prototype.hasOwnProperty.call(proto, 'emit');
+    const groups = new Map<string, { event: string; node: string; nodeUuid: string; count: number }>();
+    let total = 0;
+    let droppedGroups = 0;
+    const startedAt = Date.now();
+    root.__cocosWebInspectorEventTrace = true;
+    proto.emit = function (this: any, type: unknown, ...rest: unknown[]) {
+      try {
+        total++;
+        const event = String(typeof type === 'string' || typeof type === 'number' ? type : 'unknown').slice(0, 120);
+        const name = String(dataProperty(this, '_name') ?? '').slice(0, 200);
+        const uuid = String(dataProperty(this, '_id') ?? '');
+        const key = `${event}|${uuid}`;
+        const group = groups.get(key);
+        if (group) group.count++;
+        else if (groups.size < 1_000) groups.set(key, { event, node: name, nodeUuid: uuid, count: 1 });
+        else droppedGroups++;
+      } catch { /* tracing must never break the game */ }
+      return original.call(this, type, ...rest);
+    };
+    return new Promise(resolve => setTimeout(() => {
+      if (hadOwn) proto.emit = original; else delete proto.emit;
+      root.__cocosWebInspectorEventTrace = undefined;
+      const seconds = Math.max((Date.now() - startedAt) / 1_000, 0.001);
+      const top = [...groups.values()].sort((a, b) => b.count - a.count);
+      const perEvent = new Map<string, number>();
+      for (const group of top) perEvent.set(group.event, (perEvent.get(group.event) ?? 0) + group.count);
+      resolve({
+        version,
+        durationMs: Date.now() - startedAt,
+        totalEmits: total,
+        emitsPerSecond: Math.round(total / seconds),
+        byEvent: [...perEvent.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit).map(([event, count]) => ({ event, count })),
+        top: top.slice(0, limit).map(group => ({ ...group, perSecond: Math.round(group.count / seconds) })),
+        truncated: top.length > limit || droppedGroups > 0,
+        truncationReasons: top.length > limit || droppedGroups > 0 ? ['NODE_LIMIT'] : [],
+      });
+    }, durationMs));
   }
 
   if (request.action === 'getNodeBounds') return { version, uuid: request.uuid, ...nodeBounds(findByUuid(request.uuid)) };

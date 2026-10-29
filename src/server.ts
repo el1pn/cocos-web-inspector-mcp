@@ -326,6 +326,12 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       annotations: { ...runtimeMutation, idempotentHint: false },
     }, input => execute({ action: 'analyzeBatches', limit: input.limit, tintMs: input.tintMs }, input.pageUrl));
 
+    if (web) server.registerTool('cocos_event_trace', {
+      description: 'Count Node events (emit calls) per event name and node for a bounded window, to find event storms such as a TRANSFORM_CHANGED or custom event fired every frame. Wraps Node.prototype.emit for durationMs and restores it; arguments are never recorded.',
+      inputSchema: obj({ pageUrl, durationMs: z.number().int().min(100).max(10_000).optional(), limit: z.number().int().min(1).max(200).optional() }),
+      annotations: { ...runtimeMutation, idempotentHint: false },
+    }, input => execute({ action: 'eventTrace', durationMs: input.durationMs, limit: input.limit }, input.pageUrl));
+
     for (const action of ['pause', 'resume'] as const) {
       server.registerTool(`cocos_${action}`, {
         description: `${action === 'pause' ? 'Pause' : 'Resume'} the Cocos director through its public API.`,
@@ -398,6 +404,30 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     inputSchema: obj({ pageUrl, limit: z.number().int().min(1).max(500).optional() }),
     annotations: readOnly,
   }, input => execute({ action: 'listenerReport', limit: input.limit }, input.pageUrl));
+
+  // Native node fields live behind accessors the data-property reader skips, so these stay web-only until checked on a device.
+  if (web) for (const [name, action, description] of [
+    ['cocos_explain_visibility', 'explainVisibility', 'Explain why a node is not visible: inactive ancestors, disabled or transparent renderer, missing spriteFrame, empty Label, zero opacity/scale/size, a layer no active camera renders, outside the viewport, clipped by a Mask, or possibly covered by an opaque Sprite. Returns reasons (definite) and warnings (possible) without changing anything.'],
+    ['cocos_explain_layout', 'explainLayout', 'Explain why a node has its size and position: its Widget edges and align mode, a parent Layout that places or resizes it, Label/Sprite size modes, ancestor scale, and the resulting viewport rectangle. Pair with cocos_emulate_device to compare resolutions.'],
+  ] as const) {
+    server.registerTool(name, {
+      description,
+      inputSchema: obj({ pageUrl, ...target }).refine(oneTarget, oneTargetMessage),
+      annotations: readOnly,
+    }, input => executeNode(input, uuid => ({ action, uuid }) as BridgeRequest));
+  }
+
+  if (web) server.registerTool('cocos_animation_report', {
+    description: 'List what is animating now: Animation components with playing states (speed, wrap mode, time), Spine/DragonBones components with their current animation, and tween targets with action counts. Read-only; nothing is played or stopped.',
+    inputSchema: obj({ pageUrl, limit: z.number().int().min(1).max(500).optional() }),
+    annotations: readOnly,
+  }, input => execute({ action: 'animationReport', limit: input.limit }, input.pageUrl));
+
+  if (web) server.registerTool('cocos_frame_profile', {
+    description: 'Sample real frames for a while and report frame time (avg, p50, p95, max), fps, spike count, the worst frames, and draw call and triangle ranges. Needs the game running (not paused). Subscribes to the director for the sample window only.',
+    inputSchema: obj({ pageUrl, frames: z.number().int().min(2).max(600).optional(), timeoutMs: z.number().int().min(100).max(30_000).optional() }),
+    annotations: { ...readOnly, idempotentHint: false },
+  }, input => execute({ action: 'frameProfile', frames: input.frames, timeoutMs: input.timeoutMs }, input.pageUrl));
 
   server.registerTool('cocos_dynamic_atlas', {
     description: 'Report the Cocos dynamic atlas: config, each atlas page with its packed textures, positions, fill ratio, and GPU bytes, plus why visible sprites stayed out of it (DISABLED, COMPRESSED, TOO_LARGE, FILTER, NOT_PACKABLE, ATLAS_FULL, ...).',

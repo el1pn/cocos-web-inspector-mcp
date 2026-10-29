@@ -2,6 +2,17 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Added
+
+- `cocos_explain_visibility`: reasons a node is not visible (inactive, disabled or transparent renderer, missing `spriteFrame`, zero opacity/scale/size, unrendered layer, off-screen, Mask clipping), plus a possibly-covered warning.
+- `cocos_explain_layout`: what sets a node's size and position (Widget, parent Layout, Label/Sprite size modes, ancestor scale) and its viewport rectangle.
+- `cocos_animation_report`: playing Animation states, Spine/DragonBones animations, and tween targets.
+- `cocos_frame_profile`: frame time percentiles, spikes, worst frames, and draw call and triangle ranges over sampled frames.
+- `cocos_event_trace` (debugger mode): per-event and per-node `emit` counts over a bounded window to find event storms.
+- These five tools are web only; native mode omits them.
+
 ## 2.3.0
 
 ### Added

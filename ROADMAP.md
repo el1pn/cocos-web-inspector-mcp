@@ -373,6 +373,14 @@ It registers only with `--allow-method-call`, separate from the mutation and bro
 - `cocos_listener_report` (read-only): finds timers, tweens, and global listeners outliving their owner. Unowned callbacks, which the engine can never purge, are grouped with counts so two snapshots expose growth.
 - `cocos_set_time_scale` (debugger mode): scales `director.tick`'s delta time; `1` removes the wrapper.
 
+## Phase 8f — Explain and profile — Complete
+
+- `cocos_explain_visibility` and `cocos_explain_layout` (read-only): answer "why is it not shown" and "why is it here" from backing fields, in the style of `cocos_explain_click`.
+- `cocos_animation_report` (read-only): what animates now.
+- `cocos_frame_profile` (read-only): frame time percentiles and spikes from real frames.
+- `cocos_event_trace` (debugger mode): bounded `Node.prototype.emit` counts per event and node.
+- Native verification of all five is open.
+
 ## Not planned: scripted flows
 
 A `cocos_run_flow` tool that runs a fixed list of steps was considered and dropped. Agents calling tools one by one adapt to unexpected popups and server errors, and repeatable smoke flows belong in the game's own test suite. Path targets removed most of the round-trip cost that motivated it.
