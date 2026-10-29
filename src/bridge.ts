@@ -288,12 +288,13 @@ export function inspectCocosPage(): unknown {
   const cc = root.cc ?? root.CC;
   const version = String(cc?.ENGINE_VERSION ?? cc?.version ?? '');
   const scene = cc?.director?.getScene?.();
+  const supported = /^[23]\./.test(version);
   return {
     title: String(root.document?.title ?? '').slice(0, 500),
     cocos: {
-      detected: version.startsWith('3.'),
-      version: version.startsWith('3.') ? version : undefined,
-      sceneName: version.startsWith('3.') && scene ? String(scene.name ?? '').slice(0, 500) : undefined,
+      detected: supported,
+      version: supported ? version : undefined,
+      sceneName: supported && scene ? String(scene.name ?? '').slice(0, 500) : undefined,
     },
   };
 }
@@ -326,7 +327,10 @@ export function inspectCocos(request: BridgeRequest): unknown {
   }
   const cc = root.cc ?? root.CC;
   const version = String(cc?.ENGINE_VERSION ?? cc?.version ?? '');
-  if (!cc || !version.startsWith('3.')) throw new Error('Cocos Creator 3.x runtime not found');
+  if (!cc || !/^[23]\./.test(version)) throw new Error('Cocos Creator 2.x/3.x runtime not found');
+  const is2 = version.startsWith('2.');
+  // ponytail: 2.x supports the read-only core only; add an action here once its 2.x mapping is verified against a 2.x fixture.
+  if (is2 && !['runtimeInfo', 'runtimeDiagnostics', 'sceneTree', 'findNode', 'getNode', 'getNodeBounds', 'getComponents', 'getProperties', 'highlightNode'].includes(request.action)) throw new Error(`Unsupported on Cocos 2.x: ${request.action}`);
   const scene = cc.director?.getScene?.();
   if (!scene) throw new Error(`Active Cocos scene not found (${cc.director ? 'director has no scene yet' : 'no director'}); the game may still be booting or loading a scene, retry shortly`);
 
@@ -348,13 +352,23 @@ export function inspectCocos(request: BridgeRequest): unknown {
     }
     return undefined;
   };
+  const hasAccessor = (value: object, key: string): boolean => {
+    let current: object | null = Object.getPrototypeOf(value);
+    for (let depth = 0; current && current !== Object.prototype && depth < 20; depth++) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (descriptor) return typeof descriptor.get === 'function';
+      current = Object.getPrototypeOf(current);
+    }
+    return false;
+  };
   const componentName = (component: any): string => {
     // Release builds minify constructor names ("e"); the registered __classname__ survives, so it wins.
     const name = dataProperty(component, '__classname__') || dataProperty(component, 'constructor')?.name || 'Component';
     return String(name).replace(/^cc\./, '').slice(0, 120);
   };
   const components = (node: any): any[] => {
-    const value = node?.components;
+    // 2.x has no public `components`; its component list is the `_components` backing array.
+    const value = node?.components ?? node?._components;
     return Array.isArray(value) ? value.filter(Boolean) : [];
   };
   const children = (node: any): any[] => {
@@ -418,13 +432,16 @@ export function inspectCocos(request: BridgeRequest): unknown {
   };
   const nodeBounds = (node: any): any => {
     const document = root.document;
-    const transform = components(node).find(component => componentName(component) === 'UITransform');
+    // 2.x has no UITransform: size and anchor live on the node, so present them through the same shape.
+    const transform = is2
+      ? { contentSize: { width: node.width, height: node.height }, anchorPoint: { x: node.anchorX, y: node.anchorY }, convertToWorldSpaceAR: (point: any) => node.convertToWorldSpaceAR(new cc.Vec2(point.x, point.y)) }
+      : components(node).find(component => componentName(component) === 'UITransform');
     if (!transform?.contentSize || !transform?.anchorPoint) return { available: false, reason: 'NO_UI_TRANSFORM' };
     const canvas = cc.game?.canvas ?? document?.querySelector('#GameCanvas');
     if (typeof HTMLCanvasElement === 'undefined' || !(canvas instanceof HTMLCanvasElement)) return { available: false, reason: 'NO_CANVAS' };
     const canvasRect = canvas.getBoundingClientRect();
     const visible = cc.view?.getVisibleSize?.() ?? { width: canvasRect.width, height: canvasRect.height };
-    const position = node.worldPosition ?? node.getWorldPosition?.();
+    const position = is2 ? node.convertToWorldSpaceAR?.(new cc.Vec2(0, 0)) : node.worldPosition ?? node.getWorldPosition?.();
     const values = [canvasRect.left, canvasRect.top, canvasRect.width, canvasRect.height, visible.width, visible.height, position?.x, position?.y, transform.contentSize.width, transform.contentSize.height, transform.anchorPoint.x, transform.anchorPoint.y];
     if (!position) return { available: false, reason: 'NO_WORLD_POSITION' };
     if (!values.every(Number.isFinite) || visible.width <= 0 || visible.height <= 0 || canvasRect.width <= 0 || canvasRect.height <= 0) return { available: false, reason: 'INVALID_GEOMETRY' };
@@ -852,7 +869,9 @@ export function inspectCocos(request: BridgeRequest): unknown {
           break;
         }
         propertyCount++;
-        if (key.startsWith('_') || isSensitiveKey(key)) {
+        // 2.x keeps public properties in `_x` backing fields behind a prototype accessor `x`; expose those under the public name, never calling the getter.
+        const publicKey = is2 && key.startsWith('_') && !Array.isArray(value) && hasAccessor(value, key.slice(1)) ? key.slice(1) : key;
+        if (publicKey.startsWith('_') || isSensitiveKey(publicKey)) {
           redacted++;
           continue;
         }
@@ -869,8 +888,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
               output[index] = item;
               returned++;
             } else truncate('PROPERTY_LIMIT');
-          } else {
-            output[key] = item;
+          } else if (!(publicKey in output)) {
+            output[publicKey] = item;
             returned++;
           }
         }

@@ -3,3 +3,4 @@ dist/
 coverage/
 *.log
 .claude/
+test/fixtures/cocos-2.4.15/cocos2d-js-min.js

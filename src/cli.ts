@@ -132,7 +132,7 @@ async function nativeDoctor(): Promise<void> {
   const endpoint = `http://127.0.0.1:${port}`;
   const info = await (await new NativeConnection(endpoint).page()).evaluate(inspectCocosPage).catch(error => error as Error) as { cocos?: { detected: boolean; version?: string; sceneName?: string } } | Error;
   if (info instanceof Error) return fail('CDP_UNAVAILABLE', info.message, 'close Chrome DevTools attached to the game; the inspector takes one session at a time');
-  if (!info.cocos?.detected) return fail('COCOS_NOT_FOUND', 'no Cocos Creator 3.x runtime in the app', 'wait for the game to finish loading');
+  if (!info.cocos?.detected) return fail('COCOS_NOT_FOUND', 'no Cocos Creator 2.x/3.x runtime in the app', 'wait for the game to finish loading');
   if (!info.cocos.sceneName) return fail('SCENE_NOT_READY', `Cocos ${info.cocos.version} has no active scene yet`, 'wait for the first scene to load');
   write(`ok    Cocos ${info.cocos.version}, scene "${info.cocos.sceneName}"`);
   write(`\nAdd it to Claude Code:\n  claude mcp add cocos-native -- npx -y cocos-web-inspector-mcp --native-endpoint ${endpoint}`);
@@ -176,7 +176,7 @@ async function doctor(args: string[]): Promise<void> {
       for (const page of pages.slice(0, 10)) {
         const info = await page.evaluate(inspectCocosPage).catch(() => undefined) as { cocos?: { detected: boolean; version?: string; sceneName?: string } } | undefined;
         const name = sanitizeUrl(page.url());
-        if (!info?.cocos?.detected) fail('COCOS_NOT_FOUND', `no Cocos Creator 3.x runtime on ${name}`, 'wait for the build to load, or check that it is a Cocos Creator 3.x web build');
+        if (!info?.cocos?.detected) fail('COCOS_NOT_FOUND', `no Cocos Creator 2.x/3.x runtime on ${name}`, 'wait for the build to load, or check that it is a Cocos Creator 2.x or 3.x web build');
         else if (!info.cocos.sceneName) fail('SCENE_NOT_READY', `Cocos ${info.cocos.version} on ${name} has no active scene yet`, 'wait for the first scene to load');
         else pass(`Cocos ${info.cocos.version}, scene "${info.cocos.sceneName}" on ${name}`);
       }

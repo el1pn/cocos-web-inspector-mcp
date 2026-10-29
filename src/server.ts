@@ -57,7 +57,8 @@ function failure(error: unknown) {
   const raw = error instanceof Error ? error.message : 'Inspector request failed';
   // Playwright wraps in-page errors as "page.evaluate: Error: <message>\n<stack>".
   const message = raw.replace(/^page\.evaluate: (?:Error: )?/, '').split('\n')[0]!;
-  const code = message === 'Cocos Creator 3.x runtime not found' ? 'COCOS_NOT_FOUND'
+  const code = message === 'Cocos Creator 2.x/3.x runtime not found' ? 'COCOS_NOT_FOUND'
+    : message.startsWith('Unsupported on Cocos 2.x') ? 'UNSUPPORTED_ENGINE_VERSION'
     : message.startsWith('Active Cocos scene not found') ? 'SCENE_NOT_READY'
       : message.startsWith('Node not found') ? 'NODE_NOT_FOUND'
         : message.startsWith('Component not found') ? 'COMPONENT_NOT_FOUND'
@@ -164,7 +165,7 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
   });
 
   server.registerTool('cocos_runtime_info', {
-    description: 'Return bounded runtime information for one localhost Cocos Creator 3.x page.',
+    description: 'Return bounded runtime information for one localhost Cocos Creator 2.x or 3.x page.',
     inputSchema: obj({ pageUrl }),
     annotations: readOnly,
   }, input => execute({ action: 'runtimeInfo' }, input.pageUrl));
@@ -176,7 +177,7 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
   }, input => execute({ action: 'runtimeDiagnostics' }, input.pageUrl));
 
   server.registerTool('cocos_scene_tree', {
-    description: 'Return a bounded Cocos Creator 3.x scene tree from a localhost Chromium page.',
+    description: 'Return a bounded Cocos Creator 2.x or 3.x scene tree from a localhost Chromium page.',
     inputSchema: obj({ pageUrl, maxDepth: z.number().int().min(0).max(20).optional(), maxNodes: z.number().int().min(1).max(5_000).optional() }),
     annotations: readOnly,
   }, input => execute({ action: 'sceneTree', maxDepth: input.maxDepth, maxNodes: input.maxNodes }, input.pageUrl));

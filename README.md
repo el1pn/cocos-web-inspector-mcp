@@ -1,13 +1,13 @@
 # cocos-web-inspector-mcp
 
-Read-only MCP server for inspecting Cocos Creator 3.x games running in a local Chromium browser.
+Read-only MCP server for inspecting Cocos Creator 2.x and 3.x games (2.x: read-only core tools only) running in a local Chromium browser.
 
 ## Scope
 
 The current MVP supports:
 
 - Chromium connected through a loopback Chrome DevTools Protocol (CDP) endpoint
-- Cocos Creator 3.x web builds served from loopback
+- Cocos Creator 2.x and 3.x web builds served from loopback
 - stdio MCP transport
 - Scene, node, component, and public-property inspection
 - Temporary DOM-only node highlighting
@@ -18,7 +18,7 @@ By default it does not edit Cocos game state, launch browsers, expose browser co
 
 - Node.js 22+
 - A Chromium browser started with remote debugging bound to loopback
-- A Cocos Creator 3.x web build served from loopback
+- A Cocos Creator 2.x or 3.x web build served from loopback
 
 The quickest start launches a locally installed Chrome with a disposable profile, loopback-only remote debugging, and the game URL, then prints the matching `claude mcp add` command:
 
@@ -35,7 +35,7 @@ Check a setup step by step, with a fix for each failure:
 npx --yes cocos-web-inspector-mcp doctor --cdp-endpoint http://127.0.0.1:9222
 ```
 
-`doctor` checks the endpoint policy, what answers on the port, eligible localhost pages, Cocos 3.x detection, and the active scene. It exits with status 1 when a check fails.
+`doctor` checks the endpoint policy, what answers on the port, eligible localhost pages, Cocos 2.x/3.x detection, and the active scene. It exits with status 1 when a check fails.
 
 Or start Chrome manually on Windows with a disposable profile:
 

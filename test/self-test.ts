@@ -500,10 +500,23 @@ test('runBridge bounds oversized encoded responses', async () => {
   });
 });
 
-test('bridge rejects non-3.x runtimes', () => {
-  (globalThis as any).cc = { ENGINE_VERSION: '2.4.15', director: { getScene: () => ({}) } };
-  assert.throws(() => inspectCocos({ action: 'sceneTree' }), /3.x/);
+test('bridge rejects unsupported engine versions', () => {
+  (globalThis as any).cc = { ENGINE_VERSION: '1.10.2', director: { getScene: () => ({}) } };
+  assert.throws(() => inspectCocos({ action: 'sceneTree' }), /2\.x\/3\.x/);
   delete (globalThis as any).cc;
+});
+
+test('bridge reads the 2.x scene tree and rejects actions without a 2.x mapping', () => {
+  const child = { uuid: 'c', name: 'Child', active: true, activeInHierarchy: true, children: [], _components: [] };
+  (globalThis as any).cc = { ENGINE_VERSION: '2.4.15', director: { getScene: () => ({ uuid: 's', name: 'Scene', children: [child], _components: [] }) } };
+  try {
+    const tree = inspectCocos({ action: 'sceneTree' }) as any;
+    assert.equal(tree.version, '2.4.15');
+    assert.equal(tree.scene.children[0].name, 'Child');
+    assert.throws(() => inspectCocos({ action: 'pause' }), /Unsupported on Cocos 2\.x: pause/);
+  } finally {
+    delete (globalThis as any).cc;
+  }
 });
 
 test('MCP explain click accepts exactly one node target or a coordinate pair', async () => {

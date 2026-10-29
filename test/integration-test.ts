@@ -38,7 +38,7 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
 }
 
-function createFixtureServer(root: string): Server {
+function createFixtureServer(root: string, engineOverride?: string): Server {
   return createHttpServer(async (request, response) => {
     try {
       const pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://localhost').pathname);
@@ -46,6 +46,11 @@ function createFixtureServer(root: string): Server {
       if (pathname === '/api/login') {
         response.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'sid=server-session-secret; Path=/' });
         response.end(JSON.stringify({ user: 'bob', accessToken: 'response-token-secret', level: 7 }));
+        return;
+      }
+      if (engineOverride && pathname === '/cocos2d-js-min.js') {
+        response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' });
+        response.end(await readFile(engineOverride));
         return;
       }
       const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
@@ -852,6 +857,64 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     await reconnectedPage.goto(pageUrl);
     await waitForFixture(reconnectedPage);
     assert.equal((await call(client, 'cocos_scene_tree', { pageUrl })).scene.name, 'InspectorTest');
+  } finally {
+    await Promise.allSettled([client.close(), server.close(), browserConnection.close(), launched?.context.close() ?? Promise.resolve()]);
+    await closeServer(fixtureServer).catch(() => undefined);
+    await rm(profileRoot, { recursive: true, force: true });
+  }
+});
+
+// The 2.x engine is not redistributable (its shipped license forbids it), so it is supplied locally: COCOS_2X_ENGINE, or the copy inside an installed Creator 2.4.15.
+const engine2x = process.env.COCOS_2X_ENGINE || 'C:/ProgramData/cocos/editors/Creator/2.4.15/resources/engine/bin/.cache/web-mobile/cocos2d-js-min.js';
+const engine2xFound = await stat(engine2x).then(info => info.isFile(), () => false);
+if (process.env.COCOS_2X_ENGINE && !engine2xFound) throw new Error(`COCOS_2X_ENGINE does not point to a file: ${engine2x}`);
+
+test('live Chromium inspects the Cocos 2.4.15 fixture through the read-only 2.x tools', { timeout: 90_000, skip: engine2xFound ? false : `SKIPPED: no Cocos 2.4.15 engine; set COCOS_2X_ENGINE to cocos2d-js-min.js (default ${engine2x})` }, async () => {
+  const fixtureServer = createFixtureServer(resolve('test/fixtures/cocos-2.4.15'), engine2x);
+  const fixturePort = await listen(fixtureServer);
+  const pageUrl = `http://127.0.0.1:${fixturePort}/`;
+  const cdpPort = await reservePort();
+  const profileRoot = await mkdtemp(join(tmpdir(), 'cocos-web-inspector-2x-'));
+  let launched: { browser: Browser; context: BrowserContext } | undefined;
+  const browserConnection = new BrowserConnection(`http://127.0.0.1:${cdpPort}`);
+  const server = createServer(browserConnection, { allowRuntimeMutation: true });
+  const client = new Client({ name: 'integration-test-2x', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+
+  try {
+    launched = await launchBrowser(cdpPort, profileRoot);
+    const page = launched.context.pages()[0] ?? await launched.context.newPage();
+    await page.goto(pageUrl);
+    await waitForFixture(page);
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    const pages = await call(client, 'cocos_list_pages', {});
+    assert.deepEqual(pages.pages[0].cocos, { detected: true, version: '2.4.15', sceneName: 'InspectorTest' });
+    assert.equal((await call(client, 'cocos_runtime_info', { pageUrl })).scene.name, 'InspectorTest');
+
+    const tree = await call(client, 'cocos_scene_tree', { pageUrl, maxDepth: 6 });
+    assert.deepEqual(tree.scene.children[0].children.map((node: { name: string }) => node.name), ['Main Camera', 'Panel']);
+    const panel = (await call(client, 'cocos_find_node', { pageUrl, path: '/InspectorTest/Canvas/Panel' })).matches[0];
+    assert.deepEqual(panel.componentTypes, ['InspectorFixture']);
+
+    // 2.x keeps public values in `_x` backing fields behind accessors: expose them as `x`, redact secrets, never run getters.
+    const properties = await call(client, 'cocos_get_properties', { pageUrl, uuid: panel.uuid, componentType: 'InspectorFixture' });
+    assert.equal(properties.properties.publicValue, 42);
+    assert.equal(properties.properties.level, 7);
+    assert.equal(properties.properties.title, 'canary');
+    assert.equal(properties.properties.accessToken, undefined);
+    // The throwing getter never ran: the value comes from its backing field.
+    assert.equal(properties.properties.mustNotRun, 'backing-value');
+    assert.equal(properties.properties._level, undefined);
+
+    const bounds = await call(client, 'cocos_get_node_bounds', { pageUrl, uuid: panel.uuid });
+    assert.equal(bounds.available, true, JSON.stringify(bounds));
+    assert.ok(bounds.viewport.width > 0 && bounds.viewport.height > 0);
+    assert.equal((await call(client, 'cocos_highlight_node', { pageUrl, uuid: panel.uuid })).highlighted, true);
+
+    const refused = await client.callTool({ name: 'cocos_set_node_active', arguments: { pageUrl, uuid: panel.uuid, active: false } });
+    assert.equal(refused.isError, true);
+    assert.equal((refused.structuredContent as any)?.code, 'UNSUPPORTED_ENGINE_VERSION');
   } finally {
     await Promise.allSettled([client.close(), server.close(), browserConnection.close(), launched?.context.close() ?? Promise.resolve()]);
     await closeServer(fixtureServer).catch(() => undefined);
