@@ -60,12 +60,12 @@ export async function visibleClip(page: Page, uuid: string): Promise<Clip | { re
 }
 
 /** Whether base64 image data stays under the response ceiling. */
-export const fitsImage = (data: string) => Buffer.byteLength(JSON.stringify({ data }), 'utf8') <= MAX_BYTES - 4_096;
+export const fitsImage = (data: string, limit = MAX_BYTES - 4_096) => Buffer.byteLength(JSON.stringify({ data }), 'utf8') <= Math.min(limit, MAX_BYTES - 4_096);
 
-export async function captureNode(page: Page, uuid: string): Promise<unknown> {
+export async function captureNode(page: Page, uuid: string, maxBytes?: number): Promise<unknown> {
   const clip = await visibleClip(page, uuid);
   if ('reason' in clip) return { captured: false, reason: clip.reason };
-  const fits = fitsImage;
+  const fits = (data: string) => fitsImage(data, maxBytes);
   const size = { width: Math.round(clip.width), height: Math.round(clip.height) };
   // Device-pixel PNG, then CSS-pixel JPEG quality steps.
   const attempts: Array<{ type: 'png' | 'jpeg'; quality?: number; scale: 'device' | 'css' }> = [{ type: 'png', scale: 'device' }, ...[80, 60, 40].map(quality => ({ type: 'jpeg' as const, quality, scale: 'css' as const }))];
@@ -301,7 +301,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
   const version = String(cc?.ENGINE_VERSION ?? cc?.version ?? '');
   if (!cc || !version.startsWith('3.')) throw new Error('Cocos Creator 3.x runtime not found');
   const scene = cc.director?.getScene?.();
-  if (!scene) throw new Error('Active Cocos scene not found');
+  if (!scene) throw new Error(`Active Cocos scene not found (${cc.director ? 'director has no scene yet' : 'no director'}); the game may still be booting or loading a scene, retry shortly`);
 
   const sensitiveParts = ['token', 'cookie', 'authorization', 'password', 'secret', 'credential', 'storage', 'jwt', 'apikey', 'privatekey', 'accesskey', 'signingkey', 'authheader'];
   const isSensitiveKey = (key: string): boolean => {
@@ -386,7 +386,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
         return false;
       }
     });
-    if (!match) throw new Error(traversal.truncated ? 'Node not found within traversal limit' : 'Node not found');
+    if (!match) throw new Error(traversal.truncated ? 'Node not found within traversal limit' : `Node not found${/^(Node|Comp)\.\d+$/.test(uuid) ? '; Node.N ids are runtime-assigned and change on scene switch or reload, look the node up by path' : ''}`);
     return match;
   };
   const nodeBounds = (node: any): any => {
@@ -857,11 +857,11 @@ export function inspectCocos(request: BridgeRequest): unknown {
   if (request.action === 'getProperties') {
     const node = findByUuid(request.uuid);
     const matches = request.componentType ? components(node).filter(component => componentName(component) === request.componentType) : [];
-    if (matches.length > 1) throw new Error('Ambiguous component type');
+    if (matches.length > 1) throw new Error(`Ambiguous component type ${request.componentType}; pass componentUuid: ${matches.map(component => component?.uuid).join(', ')}`);
     const selected = request.componentUuid
       ? components(node).find(component => component?.uuid === request.componentUuid)
       : request.componentType ? matches[0] : node;
-    if (!selected) throw new Error('Component not found');
+    if (!selected) throw new Error(`Component not found: ${request.componentUuid ?? request.componentType} on ${node.name}; components: ${components(node).map(component => `${componentName(component)} ${component?.uuid}`).join(', ').slice(0, 500)}`);
     const maxDepth = Math.min(Math.max(request.maxDepth ?? 3, 0), 6);
     const serializer = createSerializer(maxDepth);
     const { serialize, truncate } = serializer;
@@ -929,7 +929,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
   const snapshot = (value: any, keys: string[]): Record<string, number> => Object.fromEntries(keys.map(key => [key, Number(value?.[key] ?? 0)]));
   const componentByUuid = (node: any, uuid: string): any => {
     const component = components(node).find(candidate => candidate?.uuid === uuid);
-    if (!component) throw new Error('Component not found');
+    if (!component) throw new Error(`Component not found: ${uuid} on ${node?.name}; components: ${components(node).map(candidate => `${componentName(candidate)} ${candidate?.uuid}`).join(', ').slice(0, 500)}`);
     return component;
   };
   const directorState = () => {
@@ -1186,7 +1186,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
     let owner: any = component;
     let descriptor: PropertyDescriptor | undefined;
     for (let depth = 0; owner && depth < 20 && !descriptor; depth++, owner = Object.getPrototypeOf(owner)) descriptor = Object.getOwnPropertyDescriptor(owner, request.key);
-    if (!descriptor || !('value' in descriptor)) invalidMutation('property is not a data property');
+    if (!descriptor || !('value' in descriptor)) invalidMutation('property is not a data property (accessor or missing); only plain data properties are writable');
     const current = (descriptor as PropertyDescriptor & { value: any }).value;
     const keys = current && typeof current === 'object'
       ? 'width' in current && 'height' in current ? ['width', 'height'] : 'r' in current && 'g' in current && 'b' in current ? ['r', 'g', 'b', 'a'] : ['x', 'y', ...('z' in current ? ['z'] : []), ...('w' in current ? ['w'] : [])]
@@ -1265,7 +1265,11 @@ export function inspectCocos(request: BridgeRequest): unknown {
     let owner: any = target;
     let descriptor: PropertyDescriptor | undefined;
     for (let depth = 0; owner && owner !== Object.prototype && depth < 20 && !descriptor; depth++, owner = Object.getPrototypeOf(owner)) descriptor = Object.getOwnPropertyDescriptor(owner, name);
-    if (!descriptor || typeof descriptor.value !== 'function') return invalidMutation(`${name} is not a method of ${target === node ? 'Node' : componentName(target)}`);
+    if (!descriptor || typeof descriptor.value !== 'function') {
+      const hasMethod = (object: any): boolean => { for (let owner = object, depth = 0; owner && owner !== Object.prototype && depth < 20; depth++, owner = Object.getPrototypeOf(owner)) if (typeof Object.getOwnPropertyDescriptor(owner, name)?.value === 'function') return true; return false; };
+      const owners = target === node ? components(node).filter(hasMethod).map(component => `${componentName(component)} ${component?.uuid}`) : [];
+      return invalidMutation(`${name} is not a method of ${target === node ? 'Node' : componentName(target)}${owners.length ? `; components with ${name}: ${owners.join(', ')} (pass componentUuid)` : ''}`);
+    }
     const resolve = (value: any, depth = 0): any => {
       if (depth > 10) invalidMutation('argument nesting is too deep');
       if (Array.isArray(value)) return value.map(item => resolve(item, depth + 1));

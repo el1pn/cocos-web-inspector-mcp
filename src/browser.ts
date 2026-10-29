@@ -94,7 +94,10 @@ export class BrowserConnection {
     if (pageUrl) {
       const wanted = validateLocalUrl(pageUrl, true).href;
       const selected = pages.filter(candidate => new URL(candidate.url()).href === wanted);
-      if (selected.length === 0) throw new InspectorError('PAGE_NOT_FOUND', `Local page not found: ${sanitizeUrl(pageUrl)}`);
+      if (selected.length === 0) {
+        const open = pages.slice(0, 10).map(candidate => sanitizeUrl(candidate.url())).join(', ');
+        throw new InspectorError('PAGE_NOT_FOUND', `Local page not found: ${sanitizeUrl(pageUrl)} (pageUrl must equal the full open page URL including query and fragment; open pages, shown without them: ${open || 'none'})`);
+      }
       if (selected.length > 1) throw new InspectorError('MULTIPLE_PAGES', `Multiple localhost pages match pageUrl: ${sanitizeUrl(pageUrl)}; close duplicate tabs or use a separate Chromium per project`);
       return selected[0]!;
     }
@@ -144,7 +147,8 @@ export class BrowserConnection {
       const hint = /\b404\b/.test(message)
         ? '; port is likely held by Chrome built-in remote debugging (chrome://inspect/#remote-debugging), which has no /json/version: turn it off or use another port, check with lsof -nP -iTCP:<port> -sTCP:LISTEN'
         : '';
-      throw new InspectorError('CDP_UNAVAILABLE', `Unable to connect to Chromium CDP: ${message}${hint}`);
+      const launch = /ECONNREFUSED/.test(message) ? '; no Chromium is listening there: start one with --remote-debugging-port=<port> --user-data-dir=<dir>, or point the server at the right port with --cdp-endpoint / COCOS_CDP_ENDPOINT' : '';
+      throw new InspectorError('CDP_UNAVAILABLE', `Unable to connect to Chromium CDP at ${sanitizeUrl(this.endpoint)}: ${message}${hint}${launch}`);
     });
     this.#connecting = connecting;
     try {

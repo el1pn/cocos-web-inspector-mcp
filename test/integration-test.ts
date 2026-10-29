@@ -746,7 +746,8 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.deepEqual(missingNode.structuredContent, { code: 'NODE_NOT_FOUND', message: 'Node not found' });
     const missing = await client.callTool({ name: 'cocos_runtime_info', arguments: { pageUrl: `http://127.0.0.1:${fixturePort}/missing` } });
     assert.equal(missing.isError, true);
-    assert.deepEqual(missing.structuredContent, { code: 'PAGE_NOT_FOUND', message: `Local page not found: http://127.0.0.1:${fixturePort}/missing` });
+    assert.equal((missing.structuredContent as any).code, 'PAGE_NOT_FOUND');
+    assert.match((missing.structuredContent as any).message, new RegExp(`^Local page not found: http://127\\.0\\.0\\.1:${fixturePort}/missing \\(.*open pages, shown without them: http://127\\.0\\.0\\.1:${fixturePort}/`));
     assert.equal((await call(client, 'cocos_scene_tree', { pageUrl })).scene.name, 'InspectorTest');
 
     await launched.context.close();

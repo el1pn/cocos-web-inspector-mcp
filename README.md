@@ -172,7 +172,7 @@ All tool input objects are strict. Unknown fields are rejected. Inspection tools
 | `cocos_snapshot_subtree` | Return a bounded stateless hierarchy snapshot; clients compare snapshots. | `pageUrl?`; `uuid`; `maxDepth?`; `maxNodes?` |
 | `cocos_observe_changes` | Return an initial normalized semantic snapshot, then unchanged or compact added/removed/changed node deltas. Server-only baseline state; supported on web and native. | `pageUrl?`; optional `uuid` or `path`; `reset?`; `maxDepth?` `0..20`, default `6`; `maxNodes?` `1..5000`, default `500` |
 | `cocos_get_node_bounds` | Return bounded canvas/viewport bounds, anchor, world position, and visibility for one UI node. | `pageUrl?`; `uuid` |
-| `cocos_capture_node` | Return an in-memory viewport-clipped image for one visible UI node: PNG, falling back to JPEG when PNG exceeds the response limit; no file is written. | `pageUrl?`; `uuid` |
+| `cocos_capture_node` | Return an in-memory viewport-clipped image for one visible UI node: PNG, falling back to JPEG when PNG exceeds the response limit; no file is written. | `pageUrl?`; `uuid` or `path`; `maxBytes?` |
 | `cocos_get_properties` | Serialize public properties for a node or one component selected by type or UUID. | `pageUrl?`; `uuid`; `componentType?` or `componentUuid?`; `maxDepth?` integer `0..6`, default `3`; `0` returns top-level primitives |
 | `cocos_wait_for_property` | Poll one top-level property until it strictly equals a primitive value or the timeout passes. | `pageUrl?`; `uuid`; `componentType?` or `componentUuid?`; `key`; `equals`; `timeoutMs?` `100..30000`, default `5000`; `intervalMs?` `50..5000`, default `200` |
 | `cocos_explain_click` | Explain whether a tap reaches a node, or what a tap at a viewport point would hit, by replaying the engine's touch dispatch order without dispatching anything: the claiming node, the hit stack, and reasons. | `pageUrl?`; `uuid` or `path`, and/or `x`+`y` viewport CSS pixels |
@@ -199,13 +199,15 @@ All tool input objects are strict. Unknown fields are rejected. Inspection tools
 
 Every tool that acts on one node takes either `uuid` or `path`, never both. A path is the absolute scene path that `cocos_find_node` and `cocos_scene_tree` report, such as `/LoginScene/Canvas/panLogin/btnLogin`. Paths survive scene reloads, while node UUIDs created at runtime change on each load, so agents can act in one call instead of looking the UUID up first. Sibling nodes may share a name, so a path that matches more than one node fails with `AMBIGUOUS_NODE` and lists the candidate UUIDs; no tool acts on an ambiguous path. `cocos_call_method` arguments accept `{"$path": path}` the same way.
 
+Node ids such as `Node.1287` and `Comp.5601` are assigned at runtime and go stale after a scene switch or reload; prefer `path` or `cocos_find_node` over ids cached from earlier steps. A path starts with `/` and the root node name, so `Canvas/Btn` and `//Canvas` do not match. Optional string fields sent as `""` are treated as omitted. `cocos_call_method` rejects methods whose names start with `_` on purpose, since they are engine and game internals. `cocos_capture_node` takes `maxBytes` (1,000 to 200,000) to cap the base64 image size when the MCP client rejects large results; it downscales further instead of failing.
+
 ### Page selection
 
 Eligible game pages must use HTTP or HTTPS on a loopback host.
 
 - With one eligible page, `pageUrl` may be omitted.
 - With multiple eligible pages, `pageUrl` is required.
-- `pageUrl` must exactly match the full URL reported by the browser, including path, query, and fragment.
+- `pageUrl` must exactly match the full URL reported by the browser, including path, query, and fragment. A `PAGE_NOT_FOUND` error lists the open loopback pages (without query or fragment).
 - Tabs with identical URLs cannot be told apart; close duplicates before inspecting.
 
 Every MCP client pointed at the same CDP endpoint sees every loopback tab in that browser. When several projects run at once, give each project its own Chromium, port, and profile, then configure the server at project scope:
@@ -215,7 +217,7 @@ chrome --remote-debugging-address=127.0.0.1 --remote-debugging-port=9223 --user-
 claude mcp add cocos-web-inspector npx -- -y cocos-web-inspector-mcp@latest --cdp-endpoint http://127.0.0.1:9223
 ```
 
-Tool validation, connection, selection, and inspection failures are returned as MCP tool errors. Operational errors include JSON `structuredContent` and text content with stable `code` and `message` fields. Current codes include `CDP_UNAVAILABLE`, `NO_LOCAL_PAGE`, `MULTIPLE_PAGES`, `PAGE_NOT_FOUND`, `COCOS_NOT_FOUND`, `SCENE_NOT_READY`, `NODE_NOT_FOUND`, and `COMPONENT_NOT_FOUND`.
+Tool validation, connection, selection, and inspection failures are returned as MCP tool errors. Operational errors include JSON `structuredContent` and text content with stable `code` and `message` fields. Messages carry what is needed to retry: the endpoint and a launch hint for `CDP_UNAVAILABLE`, accepted keys for unknown arguments, candidate component UUIDs for `AMBIGUOUS_COMPONENT` and `COMPONENT_NOT_FOUND`, and the components that do have the method when `cocos_call_method` targets a node. `cocos_wait_for_property` keeps polling while the scene, node, or component is missing and reports `gone` with the last reason when the timeout passes. Current codes include `CDP_UNAVAILABLE`, `NO_LOCAL_PAGE`, `MULTIPLE_PAGES`, `PAGE_NOT_FOUND`, `COCOS_NOT_FOUND`, `SCENE_NOT_READY`, `NODE_NOT_FOUND`, and `COMPONENT_NOT_FOUND`.
 
 ### Output bounds
 

@@ -123,15 +123,15 @@ export async function nativeDrag(page: Page, uuid: string, dx: number, dy: numbe
 // Raw `screencap` output: width, height, and pixel format as uint32 LE, a colorspace word on Android 12+, then RGBA rows
 // in the current display rotation. The device gzips it (18 MB raw takes ~20 s over Wi-Fi adb, ~1.5 s gzipped), and cropping
 // raw pixels needs only zlib here, where decoding `screencap -p` would need a PNG decoder.
-export async function nativeCaptureNode(page: Page, uuid: string): Promise<unknown> {
+export async function nativeCaptureNode(page: Page, uuid: string, maxBytes?: number): Promise<unknown> {
   const clip = await visibleClip(page, uuid);
   if ('reason' in clip) return { captured: false, reason: clip.reason };
   const raw = gunzipSync(await adbBuffer(['exec-out', 'screencap | gzip -1']), { maxOutputLength: 256 * 1024 * 1024 });
-  return cropPng(raw, clip);
+  return cropPng(raw, clip, maxBytes);
 }
 
 /** Crops a raw screencap to the clip and encodes an RGB PNG, sampling every n-th pixel until it fits the response. */
-export function cropPng(raw: Buffer, clip: Clip): unknown {
+export function cropPng(raw: Buffer, clip: Clip, maxBytes?: number): unknown {
   if (raw.length < 12) return { captured: false, reason: 'SCREENCAP_FAILED' };
   const screenWidth = raw.readUInt32LE(0);
   const screenHeight = raw.readUInt32LE(4);
@@ -155,7 +155,7 @@ export function cropPng(raw: Buffer, clip: Clip): unknown {
       for (let x = 0; x < width; x++) raw.copy(rows, out + x * 3, source + x * step * 4, source + x * step * 4 + 3);
     }
     const data = png(width, height, rows).toString('base64');
-    if (fitsImage(data)) return { captured: true, mimeType: 'image/png', data, width: right - left, height: bottom - top, ...(step > 1 ? { scale: 1 / step } : {}) };
+    if (fitsImage(data, maxBytes)) return { captured: true, mimeType: 'image/png', data, width: right - left, height: bottom - top, ...(step > 1 ? { scale: 1 / step } : {}) };
   }
   return { captured: false, reason: 'RESPONSE_LIMIT' };
 }

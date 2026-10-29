@@ -249,6 +249,38 @@ test('bridge traverses, finds, and lists fake Cocos data', () => withFakeCocos((
   assert.equal(cc.director.isPaused(), true);
 }));
 
+test('browser errors list open pages and name the endpoint with a launch hint', async () => {
+  const open = fakeBrowser('http://localhost:3000/game?x=1#top');
+  const found = new BrowserConnection('http://127.0.0.1:9222', 10_000, async () => open.browser);
+  await assert.rejects(found.page('http://localhost:3000/other'), /Local page not found: http:\/\/localhost:3000\/other .*open pages, shown without them: http:\/\/localhost:3000\/game/);
+  await found.close();
+  const refused = new BrowserConnection('http://127.0.0.1:9333', 10_000, async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:9333'); });
+  await assert.rejects(refused.page(), /CDP at http:\/\/127\.0\.0\.1:9333\/?: .*ECONNREFUSED.*--remote-debugging-port=<port>.*--cdp-endpoint/);
+  await refused.close();
+});
+
+test('bridge errors name stale ids, component candidates, method owners, and scene state', () => withFakeCocos(() => {
+  const cc = (globalThis as any).cc;
+  const stats = cc.director.getScene().children[0].components[1];
+  stats.ping = () => 1;
+  const message = (request: any) => { try { inspectCocos(request); } catch (error: any) { return String(error.message); } return ''; };
+  assert.match(message({ action: 'getNode', uuid: 'Node.1287' }), /^Node not found; Node\.N ids are runtime-assigned.*by path/);
+  assert.equal(message({ action: 'getNode', uuid: 'plain-missing' }), 'Node not found');
+  assert.match(message({ action: 'getProperties', uuid: 'child-1', componentUuid: 'Comp.1' }), /^Component not found: Comp\.1 on Player; components: UITransform component-ui, StatsComponent component-stats/);
+  assert.match(message({ action: 'callMethod', uuid: 'child-1', method: 'missing', args: [] }), /^Invalid mutation: missing is not a method of Node$/);
+  const node = cc.director.getScene().children[0];
+  assert.match(message({ action: 'callMethod', uuid: 'child-1', method: 'ping', args: [] }), /is not a method of Node; components with ping: StatsComponent component-stats \(pass componentUuid\)/);
+  assert.match(message({ action: 'callMethod', uuid: 'child-1', method: '_onExit', args: [] }), /method _onExit is not callable/);
+  node.components.push(Object.assign(new (stats.constructor)(), { uuid: 'component-stats-2' }));
+  assert.match(message({ action: 'getProperties', uuid: 'child-1', componentType: 'StatsComponent' }), /^Ambiguous component type StatsComponent; pass componentUuid: component-stats, component-stats-2/);
+  const getScene = cc.director.getScene;
+  cc.director.getScene = () => null;
+  assert.match(message({ action: 'sceneTree' }), /^Active Cocos scene not found \(director has no scene yet\); .*retry shortly/);
+  delete cc.director;
+  assert.match(message({ action: 'sceneTree' }), /^Active Cocos scene not found \(no director\)/);
+  cc.director = { getScene };
+}));
+
 test('property serializer avoids getters, secrets, and cycles', () => withFakeCocos(() => {
   const node = ((globalThis as any).cc.director.getScene()).children[0];
   Object.defineProperty(node, 'dangerous', { enumerable: true, get: () => { throw new Error('getter ran'); } });
@@ -477,6 +509,37 @@ test('MCP explain click accepts exactly one node target or a coordinate pair', a
     assert.equal((await call({ path: '/Scene/Node' })).structuredContent.target, 'path-node');
     assert.deepEqual((await call({ x: 10, y: 20 })).structuredContent.target, { x: 10, y: 20 });
     for (const arguments_ of [{}, { uuid: 'node', path: '/Scene/Node' }, { uuid: 'node', x: 10, y: 20 }, { x: 10 }, { path: '' }]) assert.equal((await call(arguments_)).isError, true);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
+test('MCP treats blank optionals as omitted, names missing targets, lists accepted keys, and polls wait_for_property through a vanished node', async () => {
+  let polls = 0;
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    evaluate: async (_fn: unknown, request: any) => {
+      if (request.action === 'findNode') return { matches: ++polls < 3 ? [] : [{ uuid: 'late-node' }] };
+      return { properties: { state: 'ready' } };
+    },
+  };
+  const server = createServer({ page: async () => page, close: async () => {} } as any);
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const call = async (name: string, arguments_: Record<string, unknown>) => client.callTool({ name, arguments: arguments_ }) as Promise<any>;
+  const text = (result: any) => JSON.stringify(result.content);
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    assert.equal((await call('cocos_get_node', { uuid: 'node', path: '' })).isError, undefined);
+    assert.match(text(await call('cocos_get_node', { uuid: '', path: '' })), /Provide uuid or path(?!, not both)/);
+    assert.match(text(await call('cocos_get_node', { uuid: 'a', path: '/b' })), /not both/);
+    assert.match(text(await call('cocos_scene_tree', { depth: 2 })), /accepted: pageUrl, maxDepth, maxNodes/);
+    const waited = (await call('cocos_wait_for_property', { path: '/Scene/Late', key: 'state', equals: 'ready', timeoutMs: 5_000, intervalMs: 50 })).structuredContent;
+    assert.deepEqual({ matched: waited.matched, polls: waited.polls }, { matched: true, polls: 3 });
+    polls = -1_000;
+    const gone = (await call('cocos_wait_for_property', { path: '/Scene/Gone', key: 'state', equals: 'ready', timeoutMs: 100, intervalMs: 50 })).structuredContent;
+    assert.equal(gone.matched, false);
+    assert.match(gone.gone, /Node not found/);
   } finally {
     await Promise.allSettled([client.close(), server.close()]);
   }
@@ -839,6 +902,11 @@ test('native capture crops a raw screencap into a valid PNG and downsamples to f
     assert.deepEqual([...rows.subarray(13 * 2 + 1, 13 * 2 + 4)], [20, 30, 200], 'row 2 starts at pixel (2, 3)');
   }
   assert.deepEqual(cropPng(screencap(8, 6, 12, () => [0, 0, 0, 255]), { x: 10, y: 0, width: 4, height: 4 }), { captured: false, reason: 'OUTSIDE_VIEWPORT' });
+  const dense = screencap(64, 64, 12, (x, y) => [(x * 37 + y * 11) % 256, (x * 5 + y * 91) % 256, (x * y) % 256, 255]);
+  const full = cropPng(dense, { x: 0, y: 0, width: 64, height: 64 }) as any;
+  const capped = cropPng(dense, { x: 0, y: 0, width: 64, height: 64 }, 4_000) as any;
+  assert.equal(full.scale, undefined);
+  assert.ok(capped.scale < 1 && Buffer.byteLength(JSON.stringify({ data: capped.data })) <= 4_000, 'maxBytes forces a smaller image');
   assert.deepEqual(cropPng(Buffer.alloc(4), { x: 0, y: 0, width: 1, height: 1 }), { captured: false, reason: 'SCREENCAP_FAILED' });
   // Random pixels do not compress, so a 1080x1080 crop must downsample to fit the ceiling.
   const noisy = screencap(1080, 1080, 16, () => [Math.random() * 256, Math.random() * 256, Math.random() * 256, 255]);
