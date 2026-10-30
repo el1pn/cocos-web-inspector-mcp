@@ -2,7 +2,18 @@
 
 All notable changes are documented here.
 
-## Unreleased
+## 2.5.0
+
+### Added
+
+- Cocos Creator 2.x support (verified on 2.4.15). Runtime info, scene tree, node lookup, components, properties, bounds, highlight, pause/resume/step, stats, time scale, node/transform/property mutation, `cocos_call_method`, `cocos_snapshot_subtree`, `cocos_observe_changes`, `cocos_get_selection`, `cocos_explain_click`, `cocos_explain_visibility`, `cocos_explain_layout`, listener, animation, asset, dynamic atlas, event trace, and frame profile reports all work on 2.x.
+- `cocos_analyze_batches` reads the 3.x batcher and returns `UNSUPPORTED_ENGINE_VERSION` on 2.x.
+- On 2.x, `_x` and `_N$x` backing fields are shown under their public accessor names (for example `interactable`, `layoutType`) without calling getters.
+
+### Changed
+
+- Engine detection accepts 2.x and 3.x; other versions report `Cocos Creator 2.x/3.x runtime not found`.
+- The 2.x integration test needs a local Cocos 2.4.15 engine (`COCOS_2X_ENGINE`, or an installed Creator 2.4.15) because that engine is not redistributable; without it the test is reported as skipped.
 
 ### Fixed
 
