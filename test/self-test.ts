@@ -536,7 +536,8 @@ test('MCP explain click accepts exactly one node target or a coordinate pair', a
     assert.equal((await call({ uuid: 'node' })).structuredContent.target, 'node');
     assert.equal((await call({ path: '/Scene/Node' })).structuredContent.target, 'path-node');
     assert.deepEqual((await call({ x: 10, y: 20 })).structuredContent.target, { x: 10, y: 20 });
-    for (const arguments_ of [{}, { uuid: 'node', path: '/Scene/Node' }, { uuid: 'node', x: 10, y: 20 }, { x: 10 }, { path: '' }]) assert.equal((await call(arguments_)).isError, true);
+    assert.equal((await call({ uuid: 'node', path: '/Scene/Node' })).structuredContent.target, 'node');
+    for (const arguments_ of [{}, { uuid: 'node', x: 10, y: 20 }, { x: 10 }, { path: '' }]) assert.equal((await call(arguments_)).isError, true);
   } finally {
     await Promise.allSettled([client.close(), server.close()]);
   }
@@ -560,8 +561,10 @@ test('MCP treats blank optionals as omitted, names missing targets, lists accept
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     assert.equal((await call('cocos_get_node', { uuid: 'node', path: '' })).isError, undefined);
     assert.match(text(await call('cocos_get_node', { uuid: '', path: '' })), /Provide uuid or path(?!, not both)/);
-    assert.match(text(await call('cocos_get_node', { uuid: 'a', path: '/b' })), /not both/);
-    assert.match(text(await call('cocos_scene_tree', { depth: 2 })), /accepted: pageUrl, maxDepth, maxNodes/);
+    const both = await call('cocos_get_node', { uuid: 'a', path: '/b' });
+    assert.equal(both.isError, undefined);
+    assert.match(text(both), /used uuid and ignored path/);
+    assert.match(text(await call('cocos_scene_tree', { bogus: 2 })), /accepted: pageUrl, maxDepth, maxNodes/);
     const waited = (await call('cocos_wait_for_property', { path: '/Scene/Late', key: 'state', equals: 'ready', timeoutMs: 5_000, intervalMs: 50 })).structuredContent;
     assert.deepEqual({ matched: waited.matched, polls: waited.polls }, { matched: true, polls: 3 });
     polls = -1_000;
@@ -571,6 +574,86 @@ test('MCP treats blank optionals as omitted, names missing targets, lists accept
   } finally {
     await Promise.allSettled([client.close(), server.close()]);
   }
+});
+
+test('MCP forgives guessed keys, loose equals, and Comp ids, and explains the rest', async () => {
+  let property: unknown = true;
+  const seen: any[] = [];
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    evaluate: async (_fn: unknown, request: any) => {
+      seen.push(request);
+      return request.action === 'getProperties' ? { properties: { state: property } } : { matches: [] };
+    },
+  };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowBrowserData: true, allowMethodCall: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const call = async (name: string, arguments_: Record<string, unknown>) => client.callTool({ name, arguments: arguments_ }) as Promise<any>;
+  const text = (result: any) => JSON.stringify(result.content);
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    // Unambiguous aliases are accepted with a note.
+    const find = await call('cocos_find_node', { name: 'x', activeOnly: true });
+    assert.equal(find.isError, undefined);
+    assert.equal(seen.at(-1).active, true);
+    assert.match(text(find), /activeOnly was read as active/);
+    const wait = await call('cocos_wait_for_property', { uuid: 'n', key: 'state', value: 'true', timeoutMs: 100 });
+    assert.equal(wait.structuredContent.matched, true);
+    assert.match(text(wait), /value was read as equals/);
+    assert.equal((await call('cocos_wait_for_property', { uuid: 'n', property: 'state', equals: 'true', timeoutMs: 100 })).structuredContent.matched, true);
+    assert.doesNotMatch(text(await call('cocos_console_messages', { level: 'warn' })), /Unrecognized|Invalid arguments/);
+    // A canonical key wins over its alias: the alias stays an error with a hint.
+    assert.match(text(await call('cocos_wait_for_property', { uuid: 'n', key: 'state', equals: true, value: 1 })), /Unrecognized key\(s\): value.*value: did you mean equals/);
+    // Loose equals: type mismatch matches by string form, a real mismatch still times out.
+    property = 8000;
+    assert.equal((await call('cocos_wait_for_property', { uuid: 'n', key: 'state', equals: '8000', timeoutMs: 100 })).structuredContent.matched, true);
+    assert.equal((await call('cocos_wait_for_property', { uuid: 'n', key: 'state', equals: '8001', timeoutMs: 100, intervalMs: 50 })).structuredContent.matched, false);
+    assert.match(text(await call('cocos_wait_for_property', { uuid: 'n', key: 'state', equals: 1, timeoutMs: 60_000 })), /timeoutMs max is 30000/);
+    // Both uuid and path: uuid wins, with a note.
+    const before = seen.length;
+    const both = await call('cocos_get_properties', { uuid: 'n', path: '/Scene/N' });
+    assert.equal(both.isError, undefined);
+    assert.ok(seen.slice(before).every(request => request.action !== 'findNode'));
+    assert.match(text(both), /used uuid and ignored path/);
+    // Comp.N as a node uuid.
+    const comp = await call('cocos_get_properties', { uuid: 'Comp.5479' });
+    assert.equal(comp.isError, true);
+    assert.match(text(comp), /component id.*componentUuid/);
+    assert.match(text(await call('cocos_get_node', { uuid: 'Comp.5' })), /component id.*owns it/);
+    // Per-tool hints for keys with no alias.
+    assert.match(text(await call('cocos_scene_tree', { path: '/A' })), /path: cocos_scene_tree has no subtree root.*cocos_snapshot_subtree/);
+    assert.match(text(await call('cocos_snapshot_subtree', { uuid: 'n', depth: 2 })), /depth was read as maxDepth/);
+    assert.match(text(await call('cocos_get_properties', { uuid: 'n', component: 'cc.Label' })), /component: did you mean componentType or componentUuid/);
+    assert.match(text(await call('cocos_get_properties', { uuid: 'n', keys: ['a'] })), /keys: not supported/);
+    assert.match(text(await call('cocos_call_method', { uuid: 'n', method: 'm', componentType: 'cc.Label' })), /componentType: only componentUuid is accepted/);
+    assert.match(text(await call('cocos_console_messages', { level: 'error', types: ['log'] })), /level: did you mean types/);
+    assert.match(text(await call('cocos_find_node', { name: 'x', type: 'cc.Label' })), /Unrecognized key\(s\): type; accepted:/);
+    // Stale-id note is in the tool descriptions.
+    const described = (await client.listTools()).tools.find(tool => tool.name === 'cocos_get_node')!;
+    assert.match(described.description!, /Node\.N and Comp\.N ids are runtime-assigned/);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
+test('browser selects a page by path when pageUrl omits the query, and explains a non-standard CDP host', async () => {
+  const one = new BrowserConnection('http://127.0.0.1:9222', 10_000, async () => fakeBrowser('http://127.0.0.1:7456/?smoke=popup').browser);
+  assert.equal((await one.page('http://127.0.0.1:7456/')).url(), 'http://127.0.0.1:7456/?smoke=popup');
+  await assert.rejects(one.page('http://127.0.0.1:7456/?smoke=other'), /PAGE_NOT_FOUND|Local page not found/);
+  await one.close();
+  const two = new BrowserConnection('http://127.0.0.1:9222', 10_000, async () => {
+    const a = fakeBrowser('http://127.0.0.1:7456/?smoke=a').browser;
+    const b = fakeBrowser('http://127.0.0.1:7456/?smoke=b').browser;
+    return { ...a, contexts: () => [...a.contexts(), ...b.contexts()] } as any;
+  });
+  await assert.rejects(two.page('http://127.0.0.1:7456/'), /Local page not found/);
+  await two.close();
+  let options: any;
+  const embedded = new BrowserConnection('http://127.0.0.1:9222', 10_000, async (_endpoint, opts) => { options = opts; throw new Error('Browser.setDownloadBehavior: Browser context management is not supported.'); });
+  await assert.rejects(embedded.page(), /not a standard Chromium remote-debugging browser.*--user-data-dir.*launch.*--cdp-endpoint/);
+  assert.equal(options.noDefaults, true);
+  await embedded.close();
 });
 
 test('MCP omits runtime mutation tools by default', async () => {

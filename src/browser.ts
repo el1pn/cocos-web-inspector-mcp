@@ -69,7 +69,7 @@ export class BrowserConnection {
   constructor(
     private readonly endpoint: string,
     private readonly timeout = 10_000,
-    private readonly connectOverCDP: (endpoint: string, options: { timeout: number }) => Promise<Browser> =
+    private readonly connectOverCDP: (endpoint: string, options: { timeout: number; noDefaults?: boolean }) => Promise<Browser> =
       (target, options) => chromium.connectOverCDP(target, options),
   ) {
     validateLocalUrl(endpoint);
@@ -92,11 +92,17 @@ export class BrowserConnection {
   async page(pageUrl?: string): Promise<Page> {
     const pages = await this.pages();
     if (pageUrl) {
-      const wanted = validateLocalUrl(pageUrl, true).href;
-      const selected = pages.filter(candidate => new URL(candidate.url()).href === wanted);
+      const wantedUrl = validateLocalUrl(pageUrl, true);
+      const wanted = wantedUrl.href;
+      let selected = pages.filter(candidate => new URL(candidate.url()).href === wanted);
+      // A pageUrl without query and fragment selects the open page that differs only by them, when that is unambiguous.
+      if (selected.length === 0 && !wantedUrl.search && !wantedUrl.hash) {
+        selected = pages.filter(candidate => { const url = new URL(candidate.url()); return url.origin + url.pathname === wantedUrl.origin + wantedUrl.pathname; });
+        if (selected.length > 1) selected = [];
+      }
       if (selected.length === 0) {
         const open = pages.slice(0, 10).map(candidate => sanitizeUrl(candidate.url())).join(', ');
-        throw new InspectorError('PAGE_NOT_FOUND', `Local page not found: ${sanitizeUrl(pageUrl)} (pageUrl must equal the full open page URL including query and fragment; open pages, shown without them: ${open || 'none'})`);
+        throw new InspectorError('PAGE_NOT_FOUND', `Local page not found: ${sanitizeUrl(pageUrl)} (pageUrl must equal the full open page URL including query and fragment, or omit both when only one open page has that path; open pages, shown without them: ${open || 'none'})`);
       }
       if (selected.length > 1) throw new InspectorError('MULTIPLE_PAGES', `Multiple localhost pages match pageUrl: ${sanitizeUrl(pageUrl)}; close duplicate tabs or use a separate Chromium per project`);
       return selected[0]!;
@@ -124,7 +130,8 @@ export class BrowserConnection {
     if (this.#browser?.isConnected()) return this.#browser;
     if (this.#connecting) return this.#connecting;
 
-    const options = { timeout: this.timeout };
+    // noDefaults skips Browser.setDownloadBehavior and media overrides, which embedded CDP hosts reject and which would alter a shared browser.
+    const options = { timeout: this.timeout, noDefaults: true };
     const connecting = this.connectOverCDP(this.endpoint, options).catch(error => {
       // A second Chromium on a taken IPv4 port may bind only [::1].
       const url = new URL(this.endpoint);
@@ -148,7 +155,8 @@ export class BrowserConnection {
         ? '; port is likely held by Chrome built-in remote debugging (chrome://inspect/#remote-debugging), which has no /json/version: turn it off or use another port, check with lsof -nP -iTCP:<port> -sTCP:LISTEN'
         : '';
       const launch = /ECONNREFUSED/.test(message) ? '; no Chromium is listening there: start one with --remote-debugging-port=<port> --user-data-dir=<dir>, or point the server at the right port with --cdp-endpoint / COCOS_CDP_ENDPOINT' : '';
-      throw new InspectorError('CDP_UNAVAILABLE', `Unable to connect to Chromium CDP at ${sanitizeUrl(this.endpoint)}: ${message}${hint}${launch}`);
+      const nonStandard = /Browser context management is not supported|Browser\.setDownloadBehavior/.test(message) ? '; the endpoint is not a standard Chromium remote-debugging browser (an embedded or custom CDP host): start a dedicated Chromium with --remote-debugging-port=<port> --user-data-dir=<dir> or run `cocos-web-inspector launch`, then pass --cdp-endpoint' : '';
+      throw new InspectorError('CDP_UNAVAILABLE', `Unable to connect to Chromium CDP at ${sanitizeUrl(this.endpoint)}: ${message}${hint}${launch}${nonStandard}`);
     });
     this.#connecting = connecting;
     try {

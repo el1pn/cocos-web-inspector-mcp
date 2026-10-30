@@ -10,8 +10,20 @@ import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fit
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 // Agents send "" for unused optional fields; treat it as omitted.
 const blank = <T extends z.ZodType>(schema: T) => z.preprocess(value => value === '' ? undefined : value, schema.optional());
-// Strict object whose unknown-key error also lists the accepted keys.
-const obj = <T extends z.ZodRawShape>(shape: T) => z.object(shape, { error: issue => issue.code === 'unrecognized_keys' ? `Unrecognized key(s): ${issue.keys.join(', ')}; accepted: ${Object.keys(shape).join(', ')}` : undefined }).strict();
+// Keys agents guess, mapped to the real keys they probably meant. Applied only for tools whose schema has the real key.
+const keyGuesses: Record<string, string[]> = {
+  level: ['types'], type: ['types'], activeOnly: ['active'], value: ['equals'], property: ['key'], propertyPath: ['key'], depth: ['maxDepth'],
+  component: ['componentType', 'componentUuid'],
+};
+// Strict object whose unknown-key error also lists the accepted keys, likely intended keys, and per-tool hints.
+const obj = <T extends z.ZodRawShape>(shape: T, hints: Record<string, string> = {}) => z.object(shape, { error: issue => {
+  if (issue.code !== 'unrecognized_keys') return undefined;
+  const advice = issue.keys.flatMap(key => {
+    const maybe = (keyGuesses[key] ?? []).filter(real => real in shape);
+    return hints[key] ? [`${key}: ${hints[key]}`] : maybe.length ? [`${key}: did you mean ${maybe.join(' or ')}`] : [];
+  });
+  return `Unrecognized key(s): ${issue.keys.join(', ')}; accepted: ${Object.keys(shape).join(', ')}${advice.length ? `; ${advice.join('; ')}` : ''}`;
+} }).strict();
 const pageUrl = blank(z.url());
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const temporaryMutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
@@ -44,6 +56,10 @@ async function resolveUuid(page: Page, input: Target): Promise<string> {
   if (matches.length > 1) throw new InspectorError('AMBIGUOUS_NODE', `Path matches ${found.truncated ? 'more than 10' : matches.length} nodes; pass one uuid: ${matches.map(match => match.uuid).join(', ')}`);
   return matches[0]!.uuid;
 }
+
+// Agents pass "true" or "8000" for a boolean or number property: compare primitives of different types by their string form.
+const looseEquals = (value: unknown, expected: unknown) => value === expected
+  || ['string', 'number', 'boolean'].includes(typeof value) && ['string', 'number', 'boolean'].includes(typeof expected) && String(value) === String(expected);
 
 function response(data: unknown) {
   return {
@@ -178,7 +194,7 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
 
   server.registerTool('cocos_scene_tree', {
     description: 'Return a bounded Cocos Creator 2.x or 3.x scene tree from a localhost Chromium page.',
-    inputSchema: obj({ pageUrl, maxDepth: z.number().int().min(0).max(20).optional(), maxNodes: z.number().int().min(1).max(5_000).optional() }),
+    inputSchema: obj({ pageUrl, maxDepth: z.number().int().min(0).max(20).optional(), maxNodes: z.number().int().min(1).max(5_000).optional() }, { path: 'cocos_scene_tree has no subtree root; use cocos_snapshot_subtree with path or uuid', uuid: 'cocos_scene_tree has no subtree root; use cocos_snapshot_subtree with path or uuid' }),
     annotations: readOnly,
   }, input => execute({ action: 'sceneTree', maxDepth: input.maxDepth, maxNodes: input.maxNodes }, input.pageUrl));
 
@@ -227,14 +243,14 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
 
   server.registerTool('cocos_get_properties', {
     description: 'Read bounded, cycle-safe public properties from a Cocos node or one component.',
-    inputSchema: obj({ pageUrl, ...target, componentType: blank(z.string().min(1)), componentUuid: blank(z.string().min(1)), maxDepth: z.number().int().min(0).max(6).optional() }).refine(oneTarget, oneTargetMessage)
+    inputSchema: obj({ pageUrl, ...target, componentType: blank(z.string().min(1)), componentUuid: blank(z.string().min(1)), maxDepth: z.number().int().min(0).max(6).optional() }, { properties: 'not supported: every public property is returned; pick one component with componentType or componentUuid and bound it with maxDepth', keys: 'not supported: every public property is returned; pick one component with componentType or componentUuid and bound it with maxDepth', maxProperties: 'not supported: every public property is returned; pick one component with componentType or componentUuid and bound it with maxDepth' }).refine(oneTarget, oneTargetMessage)
       .refine(value => !(value.componentType && value.componentUuid), 'Provide componentType or componentUuid, not both'),
     annotations: readOnly,
   }, input => executeNode(input, uuid => ({ action: 'getProperties', uuid, componentType: input.componentType, componentUuid: input.componentUuid, maxDepth: input.maxDepth })));
 
   server.registerTool('cocos_wait_for_property', {
-    description: 'Poll one top-level property of a Cocos node or component until it equals a value or the timeout passes.',
-    inputSchema: obj({ pageUrl, ...target, componentType: blank(z.string().min(1)), componentUuid: blank(z.string().min(1)), key: z.string().min(1).max(200), equals: z.union([z.boolean(), finiteNumber, z.string().max(2_000), z.null()]), timeoutMs: z.number().int().min(100).max(30_000).optional(), intervalMs: z.number().int().min(50).max(5_000).optional() }).refine(oneTarget, oneTargetMessage)
+    description: 'Poll one top-level property of a Cocos node or component until it equals a value or the timeout passes. Booleans, numbers, and strings of different types match by string form ("true" matches true, "8000" matches 8000).',
+    inputSchema: obj({ pageUrl, ...target, componentType: blank(z.string().min(1)), componentUuid: blank(z.string().min(1)), key: z.string().min(1).max(200), equals: z.union([z.boolean(), finiteNumber, z.string().max(2_000), z.null()]), timeoutMs: z.number().int().min(100).max(30_000, 'timeoutMs max is 30000').optional(), intervalMs: z.number().int().min(50).max(5_000, 'intervalMs max is 5000').optional() }).refine(oneTarget, oneTargetMessage)
       .refine(value => !(value.componentType && value.componentUuid), 'Provide componentType or componentUuid, not both'),
     annotations: readOnly,
   }, async input => {
@@ -258,10 +274,10 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
           value = undefined;
           if (!input.uuid) uuid = undefined;
         }
-        if (gone === undefined && value === input.equals || Date.now() >= deadline) break;
+        if (gone === undefined && looseEquals(value, input.equals) || Date.now() >= deadline) break;
         await new Promise(resolve => setTimeout(resolve, input.intervalMs ?? 200));
       }
-      return response({ matched: gone === undefined && value === input.equals, key: input.key, value: value ?? null, polls, ...(gone ? { gone } : {}) });
+      return response({ matched: gone === undefined && looseEquals(value, input.equals), key: input.key, value: value ?? null, polls, ...(gone ? { gone } : {}) });
     } catch (error) {
       return failure(error);
     }
@@ -446,7 +462,7 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     const jsonValue: z.ZodType<unknown> = z.lazy(() => z.union([z.null(), z.boolean(), z.number().finite(), z.string().max(10_000), z.array(jsonValue).max(100), z.record(z.string().max(200), jsonValue)]));
     server.registerTool('cocos_call_method', {
       description: 'Call one public method on a Cocos node or component selected by UUID, with JSON arguments; {"$node": uuid}, {"$path": path}, {"$component": uuid}, and {"$asset": uuid} pass live objects. Runs arbitrary game code: it can change state, reach servers, or spend currency. Returns the bounded result or the thrown error; awaitMs waits for a returned promise.',
-      inputSchema: obj({ pageUrl, ...target, componentUuid: blank(z.string().min(1)), method: z.string().min(1).max(200).regex(/^[A-Za-z$][\w$]*$/), args: z.array(jsonValue).max(20).optional(), awaitMs: z.number().int().min(0).max(30_000).optional(), maxDepth: z.number().int().min(0).max(6).optional() }).refine(oneTarget, oneTargetMessage),
+      inputSchema: obj({ pageUrl, ...target, componentUuid: blank(z.string().min(1)), method: z.string().min(1).max(200).regex(/^[A-Za-z$][\w$]*$/), args: z.array(jsonValue).max(20).optional(), awaitMs: z.number().int().min(0).max(30_000).optional(), maxDepth: z.number().int().min(0).max(6).optional() }, { componentType: 'only componentUuid is accepted; list it with cocos_get_components' }).refine(oneTarget, oneTargetMessage),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     }, input => executeNode(input, uuid => ({ action: 'callMethod', uuid, componentUuid: input.componentUuid, method: input.method, args: input.args ?? [], awaitMs: input.awaitMs, maxDepth: input.maxDepth })));
   }
@@ -498,6 +514,43 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     inputSchema: obj({ pageUrl, ...target, durationMs: z.number().int().min(100).max(10_000).optional() }).refine(oneTarget, oneTargetMessage),
     annotations: temporaryMutation,
   }, input => executeNode(input, uuid => ({ action: 'highlightNode', uuid, durationMs: input.durationMs })));
+
+  // Agents guess parameter names and pass both uuid and path. Normalize the arguments before the strict schema runs, so the schemas stay strict.
+  // ponytail: reads the SDK's private tool registry and call handler (no public hook for pre-validation); revisit when the SDK adds one.
+  type ToolCall = { params: { name: string; arguments?: Record<string, unknown> } };
+  type ToolResult = { content?: unknown[] };
+  const registry = (server as unknown as { _registeredTools: Record<string, { inputSchema?: { shape?: Record<string, unknown> }; description?: string }> })._registeredTools;
+  const handlers = (server.server as unknown as { _requestHandlers: Map<string, (request: ToolCall, extra: unknown) => Promise<ToolResult>> })._requestHandlers;
+  const callTool = handlers.get('tools/call')!;
+  const idNote = ' Node.N and Comp.N ids are runtime-assigned and change on reload or scene switch: re-resolve by path.';
+  for (const tool of Object.values(registry)) if (tool.inputSchema?.shape?.['uuid'] && tool.description) tool.description += idNote;
+  handlers.set('tools/call', async (request, extra) => {
+    const shape = registry[request.params.name]?.inputSchema?.shape;
+    const given = request.params.arguments;
+    if (!shape || !given || typeof given !== 'object' || Array.isArray(given)) return callTool(request, extra);
+    const args = { ...given };
+    const notes: string[] = [];
+    const present = (key: string) => args[key] !== undefined && args[key] !== '';
+    for (const [guess, reals] of Object.entries(keyGuesses)) {
+      const real = reals[0]!;
+      if (reals.length !== 1 || guess in shape || !(real in shape) || !(guess in args) || present(real)) continue;
+      let value = args[guess];
+      delete args[guess];
+      if (real === 'types') value = (Array.isArray(value) ? value : [value]).map(item => item === 'warn' ? 'warning' : item);
+      args[real] = value;
+      notes.push(`${guess} was read as ${real}; use ${real}`);
+    }
+    if (shape['uuid'] && shape['path'] && request.params.name !== 'cocos_find_node' && present('uuid') && present('path')) {
+      delete args['path'];
+      notes.push('uuid and path were both given; used uuid and ignored path');
+    }
+    if (typeof args['uuid'] === 'string' && args['uuid'].startsWith('Comp.')) {
+      return failure(new InspectorError('NODE_NOT_FOUND', `${args['uuid']} is a component id, not a node id${shape['componentUuid'] ? '; pass it as componentUuid together with the node uuid or path' : '; pass the uuid or path of the node that owns it'}`)) as ToolResult;
+    }
+    const result = await callTool({ ...request, params: { ...request.params, arguments: args } }, extra);
+    if (notes.length && Array.isArray(result.content)) result.content.push({ type: 'text', text: `Note: ${notes.join('; ')}` });
+    return result;
+  });
 
   return server;
 }

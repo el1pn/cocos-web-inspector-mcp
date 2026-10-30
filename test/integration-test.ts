@@ -561,7 +561,9 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.equal((await call(client, 'cocos_set_node_active', { pageUrl, path: titlePath, active: true })).after.active, true);
     assert.equal((await call(client, 'cocos_click_node', { pageUrl, path: '/InspectorTest/Canvas/Panel/TestToggle' })).clicked, true);
     assert.deepEqual((await client.callTool({ name: 'cocos_get_node', arguments: { pageUrl, path: '/InspectorTest/Canvas/Missing' } })).structuredContent, { code: 'NODE_NOT_FOUND', message: 'Node not found' });
-    assert.equal((await client.callTool({ name: 'cocos_get_node', arguments: { pageUrl, uuid: panelUuid, path: titlePath } })).isError, true, 'uuid and path are exclusive');
+    const both = await client.callTool({ name: 'cocos_get_node', arguments: { pageUrl, uuid: panelUuid, path: titlePath } }) as any;
+    assert.equal(both.isError, undefined, 'uuid wins when both are given');
+    assert.equal(both.structuredContent.node.uuid, panelUuid);
     assert.equal((await client.callTool({ name: 'cocos_get_node', arguments: { pageUrl } })).isError, true, 'one of uuid or path is required');
     const twins = await page.evaluate(() => {
       const { cc } = globalThis as any;

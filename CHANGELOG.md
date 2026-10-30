@@ -6,6 +6,12 @@ All notable changes are documented here.
 
 ### Fixed
 
+- Tool calls accept unambiguous guessed keys (`level`/`type` as `types`, `activeOnly` as `active`, `value` as `equals`, `property`/`propertyPath` as `key`, `depth` as `maxDepth`) and say so in a note; other unknown keys get a per-tool hint.
+- Passing both `uuid` and `path` uses the `uuid` and adds a note instead of failing.
+- `cocos_wait_for_property` compares a string, number, or boolean of a different type by its string form (`"true"` matches `true`), and the `timeoutMs` error names the 30000 maximum.
+- A `Comp.N` passed as a node `uuid` returns an error saying it is a component id; tool descriptions state that `Node.N`/`Comp.N` ids change on reload.
+- Attaching skips `Browser.setDownloadBehavior` (`noDefaults`), and a CDP host that still rejects browser-context calls gets a hint to launch a dedicated Chromium.
+- A `pageUrl` without query or fragment selects the one open page that differs only by them.
 - `cocos_call_method` accepts any finite number as an argument; the shared `+-1000000` bound rejected bitmasks such as node layers (`1 << 25`).
 
 ## 2.4.0
