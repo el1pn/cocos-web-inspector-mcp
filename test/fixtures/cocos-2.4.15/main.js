@@ -11,14 +11,20 @@ cc.Class({
       get() { return this._level; },
       set(value) { this._level = value; },
     },
+    tag: {
+      get() { throw new Error('getter must not run'); },
+      set() {},
+    },
     // Backed by `_mustNotRun`; reading the getter would throw, so the inspector must not call it.
     mustNotRun: {
       get() { throw new Error('getter must not run'); },
       set() {},
     },
   },
+  add(a, b) { return a + b; },
   ctor() {
     this._level = 7;
+    this._N$tag = 'n-dollar';
     this._mustNotRun = 'backing-value';
   },
 });

@@ -154,7 +154,7 @@ test('production fixture checksum and live Cocos canaries pass', { timeout: 90_0
   const profileRoot = await mkdtemp(join(tmpdir(), 'cocos-web-inspector-production-'));
   let launched: { browser: Browser; context: BrowserContext } | undefined;
   const browserConnection = new BrowserConnection(`http://127.0.0.1:${cdpPort}`);
-  const server = createServer(browserConnection, { allowRuntimeMutation: true });
+  const server = createServer(browserConnection, { allowRuntimeMutation: true, allowMethodCall: true });
   const client = new Client({ name: 'production-integration-test', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const pageUrl = `http://127.0.0.1:${fixturePort}/`;
@@ -877,7 +877,7 @@ test('live Chromium inspects the Cocos 2.4.15 fixture through the read-only 2.x 
   const profileRoot = await mkdtemp(join(tmpdir(), 'cocos-web-inspector-2x-'));
   let launched: { browser: Browser; context: BrowserContext } | undefined;
   const browserConnection = new BrowserConnection(`http://127.0.0.1:${cdpPort}`);
-  const server = createServer(browserConnection, { allowRuntimeMutation: true });
+  const server = createServer(browserConnection, { allowRuntimeMutation: true, allowMethodCall: true });
   const client = new Client({ name: 'integration-test-2x', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
@@ -906,13 +906,79 @@ test('live Chromium inspects the Cocos 2.4.15 fixture through the read-only 2.x 
     // The throwing getter never ran: the value comes from its backing field.
     assert.equal(properties.properties.mustNotRun, 'backing-value');
     assert.equal(properties.properties._level, undefined);
+    assert.equal(properties.properties.tag, 'n-dollar');
 
     const bounds = await call(client, 'cocos_get_node_bounds', { pageUrl, uuid: panel.uuid });
     assert.equal(bounds.available, true, JSON.stringify(bounds));
     assert.ok(bounds.viewport.width > 0 && bounds.viewport.height > 0);
     assert.equal((await call(client, 'cocos_highlight_node', { pageUrl, uuid: panel.uuid })).highlighted, true);
 
-    const refused = await client.callTool({ name: 'cocos_set_node_active', arguments: { pageUrl, uuid: panel.uuid, active: false } });
+    const active = await call(client, 'cocos_set_node_active', { pageUrl, uuid: panel.uuid, active: false });
+    assert.equal(active.changed, true, JSON.stringify(active));
+    assert.equal((await call(client, 'cocos_set_node_active', { pageUrl, uuid: panel.uuid, active: true })).after.active, true);
+
+    const moved = await call(client, 'cocos_set_transform', { pageUrl, uuid: panel.uuid, position: { x: 11, y: 22, z: 0 }, scale: { x: 2, y: 2, z: 1 }, rotation: { x: 0, y: 0, z: 0, w: 1 } });
+    assert.equal(moved.changed, true, JSON.stringify(moved));
+    assert.deepEqual(moved.after.position, { x: 11, y: 22, z: 0 });
+    assert.deepEqual(moved.after.scale, { x: 2, y: 2, z: 1 });
+
+    const paused = await call(client, 'cocos_pause', { pageUrl });
+    assert.equal(paused.after.paused, true, JSON.stringify(paused));
+    const stepped = await call(client, 'cocos_step_frame', { pageUrl, frames: 2 });
+    assert.ok(stepped.after.totalFrames > stepped.before.totalFrames, JSON.stringify(stepped));
+    assert.equal((await call(client, 'cocos_resume', { pageUrl })).after.paused, false);
+    assert.equal((await call(client, 'cocos_show_stats', { pageUrl, visible: true })).after.visible, true);
+    assert.equal((await call(client, 'cocos_show_stats', { pageUrl, visible: false })).after.visible, false);
+
+    const fixtureComponent = (await call(client, 'cocos_get_components', { pageUrl, uuid: panel.uuid })).components.find((component: any) => component.type === 'InspectorFixture');
+    const written = await call(client, 'cocos_set_property', { pageUrl, uuid: panel.uuid, componentUuid: fixtureComponent.uuid, key: 'publicValue', value: 99 });
+    assert.deepEqual([written.before.value, written.after.value], [42, 99], JSON.stringify(written));
+    const accessorWrite = await client.callTool({ name: 'cocos_set_property', arguments: { pageUrl, uuid: panel.uuid, componentUuid: fixtureComponent.uuid, key: 'level', value: 1 } });
+    assert.equal(accessorWrite.isError, true);
+    const called = await call(client, 'cocos_call_method', { pageUrl, uuid: panel.uuid, componentUuid: fixtureComponent.uuid, method: 'add', args: [2, 3] });
+    assert.equal(called.result.value, 5, JSON.stringify(called));
+
+    const semantic = (await call(client, 'cocos_observe_changes', { pageUrl, reset: true })).snapshot;
+    const semanticPanel = semantic.nodes.find((node: any) => node.name === 'Panel');
+    assert.deepEqual(semanticPanel.uiBounds, { x: -200, y: -150, width: 400, height: 300 }, JSON.stringify(semanticPanel));
+    assert.deepEqual(semanticPanel.scale, { x: 2, y: 2, z: 1 });
+    assert.equal(semantic.nodes.find((node: any) => node.name === 'Title').labelText, 'Inspector 2.x');
+    assert.equal(semantic.nodes.find((node: any) => node.name === 'PlayButton').buttonInteractable, true);
+    assert.equal((await call(client, 'cocos_get_selection', { pageUrl })).picker, true);
+    assert.equal((await call(client, 'cocos_get_selection', { pageUrl, disable: true })).picker, false);
+
+    const playButton = (await call(client, 'cocos_find_node', { pageUrl, path: '/InspectorTest/Canvas/Panel/PlayButton' })).matches[0];
+    const click = await call(client, 'cocos_explain_click', { pageUrl, uuid: playButton.uuid });
+    assert.equal(click.clickable, true, JSON.stringify(click));
+    assert.equal(click.claimedBy.name, 'PlayButton');
+    const miss = await call(client, 'cocos_explain_click', { pageUrl, x: 1, y: 1 });
+    assert.equal(miss.claimedBy, null, JSON.stringify(miss));
+
+    const visibility = await call(client, 'cocos_explain_visibility', { pageUrl, uuid: playButton.uuid });
+    assert.equal(visibility.visible, true, JSON.stringify(visibility));
+    const layout = await call(client, 'cocos_explain_layout', { pageUrl, uuid: playButton.uuid });
+    assert.deepEqual(layout.size, { width: 160, height: 60, anchor: { x: 0.5, y: 0.5 } }, JSON.stringify(layout));
+    assert.deepEqual(layout.localPosition, { x: 0, y: -100, z: 0 });
+    assert.equal(layout.ancestorScale.x, 2);
+    assert.equal((await call(client, 'cocos_listener_report', { pageUrl })).version, '2.4.15');
+    assert.ok((await call(client, 'cocos_animation_report', { pageUrl })).counts);
+    assert.equal((await call(client, 'cocos_dynamic_atlas', { pageUrl })).available, true);
+    const assets = await call(client, 'cocos_asset_report', { pageUrl });
+    assert.ok(assets.available !== false && assets.assetCount >= 0, JSON.stringify(assets).slice(0, 400));
+    const trace = await call(client, 'cocos_event_trace', { pageUrl, durationMs: 200 });
+    assert.ok(trace.totalEmits >= 0);
+    const profile = await call(client, 'cocos_frame_profile', { pageUrl, frames: 5 });
+    assert.ok(profile.sampled >= 2, JSON.stringify(profile));
+    assert.ok(profile.drawCalls, JSON.stringify(profile));
+
+    const scaled = await call(client, 'cocos_set_time_scale', { pageUrl, scale: 2 });
+    assert.deepEqual([scaled.before.scale, scaled.after.scale], [1, 2], JSON.stringify(scaled));
+    assert.equal((await call(client, 'cocos_set_time_scale', { pageUrl, scale: 1 })).after.scale, 1);
+
+    const subtree = await call(client, 'cocos_snapshot_subtree', { pageUrl, uuid: panel.uuid });
+    assert.deepEqual(subtree.snapshot.children.map((child: any) => child.name), ['Title', 'Icon', 'PlayButton'], JSON.stringify(subtree));
+
+    const refused = await client.callTool({ name: 'cocos_analyze_batches', arguments: { pageUrl } });
     assert.equal(refused.isError, true);
     assert.equal((refused.structuredContent as any)?.code, 'UNSUPPORTED_ENGINE_VERSION');
   } finally {

@@ -1,13 +1,13 @@
 # cocos-web-inspector-mcp
 
-Read-only MCP server for inspecting Cocos Creator 2.x and 3.x games (2.x: read-only core tools only) running in a local Chromium browser.
+Read-only MCP server for inspecting Cocos Creator 2.x and 3.x games running in a local Chromium browser.
 
 ## Scope
 
 The current MVP supports:
 
 - Chromium connected through a loopback Chrome DevTools Protocol (CDP) endpoint
-- Cocos Creator 2.x and 3.x web builds served from loopback
+- Cocos Creator 2.x and 3.x web builds served from loopback (every tool except `cocos_analyze_batches` works on 2.4.15; it reads the 3.x batcher and returns `UNSUPPORTED_ENGINE_VERSION` on 2.x)
 - stdio MCP transport
 - Scene, node, component, and public-property inspection
 - Temporary DOM-only node highlighting

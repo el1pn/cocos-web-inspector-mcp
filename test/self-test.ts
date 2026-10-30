@@ -513,7 +513,7 @@ test('bridge reads the 2.x scene tree and rejects actions without a 2.x mapping'
     const tree = inspectCocos({ action: 'sceneTree' }) as any;
     assert.equal(tree.version, '2.4.15');
     assert.equal(tree.scene.children[0].name, 'Child');
-    assert.throws(() => inspectCocos({ action: 'pause' }), /Unsupported on Cocos 2\.x: pause/);
+    assert.throws(() => inspectCocos({ action: 'analyzeBatches' }), /Unsupported on Cocos 2\.x: analyzeBatches/);
   } finally {
     delete (globalThis as any).cc;
   }

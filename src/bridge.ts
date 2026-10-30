@@ -330,7 +330,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
   if (!cc || !/^[23]\./.test(version)) throw new Error('Cocos Creator 2.x/3.x runtime not found');
   const is2 = version.startsWith('2.');
   // ponytail: 2.x supports the read-only core only; add an action here once its 2.x mapping is verified against a 2.x fixture.
-  if (is2 && !['runtimeInfo', 'runtimeDiagnostics', 'sceneTree', 'findNode', 'getNode', 'getNodeBounds', 'getComponents', 'getProperties', 'highlightNode'].includes(request.action)) throw new Error(`Unsupported on Cocos 2.x: ${request.action}`);
+  if (is2 && !['runtimeInfo', 'runtimeDiagnostics', 'sceneTree', 'findNode', 'getNode', 'getNodeBounds', 'getComponents', 'getProperties', 'highlightNode', 'pause', 'resume', 'stepFrame', 'showStats', 'setNodeActive', 'setTransform', 'snapshotSubtree', 'timeScale', 'setProperty', 'callMethod', 'pickAt', 'selection', 'semanticSnapshot', 'explainClick', 'listenerReport', 'eventTrace', 'frameProfile', 'animationReport', 'dynamicAtlas', 'assetReport', 'explainVisibility', 'explainLayout'].includes(request.action)) throw new Error(`Unsupported on Cocos 2.x: ${request.action}`);
   const scene = cc.director?.getScene?.();
   if (!scene) throw new Error(`Active Cocos scene not found (${cc.director ? 'director has no scene yet' : 'no director'}); the game may still be booting or loading a scene, retry shortly`);
 
@@ -526,6 +526,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
     };
     const render = { fps: metric(renderRoot, '_fps'), frameTimeMs: metric(renderRoot, '_frameTime'), drawCalls: metric(device, '_numDrawCalls'), triangles: metric(device, '_numTris'), instances: metric(device, '_numInstances') };
     if (render.frameTimeMs !== undefined) render.frameTimeMs *= 1_000;
+    // 2.x has no Root; the renderer exposes the last frame's draw calls and the director its frame count and delta.
+    if (is2) { render.drawCalls = metric(cc.renderer, 'drawCalls'); render.frameTimeMs = Number.isFinite(Number(cc.director?.getDeltaTime?.())) ? Number(cc.director.getDeltaTime()) * 1_000 : undefined; }
     const unavailableMetrics: Record<string, string> = { invalidComponentReferences: 'UNSUPPORTED_PUBLIC_API' };
     for (const [key, value] of Object.entries(render)) if (value === undefined) unavailableMetrics[key] = 'UNSUPPORTED_PUBLIC_API';
     return {
@@ -624,6 +626,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const hits: Array<{ node: any; path: string; viewport: any }> = [];
     // Full-screen blockers often sit on top at opacity 0; read the backing field, never the computing getter.
     const transparent = (node: any): boolean => {
+      // 2.x opacity does not cascade to children, so only the node itself counts.
+      if (is2) return dataProperty(node, '_opacity') === 0;
       for (let current = node, depth = 0; current && depth < 100; current = current.parent, depth++) {
         const local = dataProperty(dataProperty(current, '_uiProps') ?? {}, '_localOpacity');
         if (typeof local === 'number' && local <= 0) return true;
@@ -631,7 +635,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
       return false;
     };
     // Full-screen layout containers draw nothing; only nodes that render or take input can be what the user pointed at.
-    const Renderable = cc.internal?.Renderable2D;
+    const Renderable = is2 ? cc.RenderComponent : cc.internal?.Renderable2D;
     const pickable = (node: any): boolean => components(node).some(component => typeof Renderable === 'function' && component instanceof Renderable
       || /^(Sprite|Label|RichText|Graphics|Button|Toggle|EditBox|Slider)$/.test(componentName(component)));
     walk((node, path) => {
@@ -731,6 +735,11 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const nodes: any[] = [];
     let bytes = 0;
     const vector = (value: any, keys: string[]) => Object.fromEntries(keys.map(key => [key, Number(dataProperty(value ?? {}, key) ?? 0)]));
+    // 2.x keeps local TRS in one array: [px, py, pz, qx, qy, qz, qw, sx, sy, sz].
+    const trsPart = (node: any, from: number, keys: string[]) => {
+      const trs = dataProperty(node, '_trs');
+      return Object.fromEntries(keys.map((key, index) => [key, Number(trs?.[from + index] ?? 0)]));
+    };
     const collect = (node: any, path: string, depth: number) => {
       if (nodes.length >= maxNodes) { reasons.add('NODE_LIMIT'); return; }
       const item: any = {
@@ -738,18 +747,19 @@ export function inspectCocos(request: BridgeRequest): unknown {
         name: String(dataProperty(node, 'name') ?? dataProperty(node, '_name') ?? '').slice(0, 500),
         path,
         active: (dataProperty(node, '_active') ?? dataProperty(node, 'active')) !== false,
-        position: vector(dataProperty(node, '_lpos') ?? dataProperty(node, '_position') ?? dataProperty(node, 'position'), ['x', 'y', 'z']),
-        rotation: vector(dataProperty(node, '_lrot') ?? dataProperty(node, '_rotation') ?? dataProperty(node, 'rotation'), ['x', 'y', 'z', 'w']),
-        scale: vector(dataProperty(node, '_lscale') ?? dataProperty(node, '_scale') ?? dataProperty(node, 'scale'), ['x', 'y', 'z']),
+        position: is2 ? trsPart(node, 0, ['x', 'y', 'z']) : vector(dataProperty(node, '_lpos') ?? dataProperty(node, '_position') ?? dataProperty(node, 'position'), ['x', 'y', 'z']),
+        rotation: is2 ? trsPart(node, 3, ['x', 'y', 'z', 'w']) : vector(dataProperty(node, '_lrot') ?? dataProperty(node, '_rotation') ?? dataProperty(node, 'rotation'), ['x', 'y', 'z', 'w']),
+        scale: is2 ? trsPart(node, 7, ['x', 'y', 'z']) : vector(dataProperty(node, '_lscale') ?? dataProperty(node, '_scale') ?? dataProperty(node, 'scale'), ['x', 'y', 'z']),
       };
       const transform = components(node).find(component => componentName(component) === 'UITransform');
-      const size = transform && dataProperty(transform, '_contentSize');
-      const anchor = transform && dataProperty(transform, '_anchorPoint');
+      const size = is2 ? dataProperty(node, '_contentSize') : transform && dataProperty(transform, '_contentSize');
+      const anchor = is2 ? dataProperty(node, '_anchorPoint') : transform && dataProperty(transform, '_anchorPoint');
       if (size && anchor) item.uiBounds = { x: -Number(dataProperty(size, 'width') ?? 0) * Number(dataProperty(anchor, 'x') ?? 0), y: -Number(dataProperty(size, 'height') ?? 0) * Number(dataProperty(anchor, 'y') ?? 0), width: Number(dataProperty(size, 'width') ?? 0), height: Number(dataProperty(size, 'height') ?? 0) };
       const label = components(node).find(component => componentName(component) === 'Label');
       if (label && typeof dataProperty(label, '_string') === 'string') item.labelText = String(dataProperty(label, '_string')).slice(0, 2_000);
       const button = components(node).find(component => componentName(component) === 'Button');
-      if (button && typeof dataProperty(button, '_interactable') === 'boolean') item.buttonInteractable = dataProperty(button, '_interactable');
+      const interactable = button && (dataProperty(button, '_interactable') ?? dataProperty(button, '_N$interactable'));
+      if (typeof interactable === 'boolean') item.buttonInteractable = interactable;
       const encoded = utf8Bytes(JSON.stringify(item));
       if (bytes + encoded > budget) { reasons.add('RESPONSE_LIMIT'); return; }
       bytes += encoded;
@@ -870,7 +880,9 @@ export function inspectCocos(request: BridgeRequest): unknown {
         }
         propertyCount++;
         // 2.x keeps public properties in `_x` backing fields behind a prototype accessor `x`; expose those under the public name, never calling the getter.
-        const publicKey = is2 && key.startsWith('_') && !Array.isArray(value) && hasAccessor(value, key.slice(1)) ? key.slice(1) : key;
+        // 2.x stores serialized properties in _x or _N$x behind a prototype accessor; expose them under the accessor name.
+        const backing = is2 && key.startsWith('_') && !Array.isArray(value) ? key.startsWith('_N$') ? key.slice(3) : key.slice(1) : '';
+        const publicKey = backing && hasAccessor(value, backing) ? backing : key;
         if (publicKey.startsWith('_') || isSensitiveKey(publicKey)) {
           redacted++;
           continue;
@@ -1197,11 +1209,18 @@ export function inspectCocos(request: BridgeRequest): unknown {
   if (request.action === 'setTransform') {
     if (!request.position && !request.rotation && !request.scale) invalidMutation('provide position, rotation, or scale');
     const node = findByUuid(request.uuid);
-    const before = {
-      ...(request.position ? { position: snapshot(node.position, ['x', 'y', 'z']) } : {}),
-      ...(request.rotation ? { rotation: snapshot(node.rotation, ['x', 'y', 'z', 'w']) } : {}),
-      ...(request.scale ? { scale: snapshot(node.scale, ['x', 'y', 'z']) } : {}),
+    // 2.x: node.rotation is a deprecated angle and node.scale a number, so read the Vec3/Quat through the getters.
+    const read = {
+      position: () => is2 ? node.getPosition(new cc.Vec3()) : node.position,
+      rotation: () => is2 ? node.getRotation(new cc.Quat()) : node.rotation,
+      scale: () => is2 ? node.getScale(new cc.Vec3()) : node.scale,
     };
+    const state = () => ({
+      ...(request.position ? { position: snapshot(read.position(), ['x', 'y', 'z']) } : {}),
+      ...(request.rotation ? { rotation: snapshot(read.rotation(), ['x', 'y', 'z', 'w']) } : {}),
+      ...(request.scale ? { scale: snapshot(read.scale(), ['x', 'y', 'z']) } : {}),
+    });
+    const before = state();
     if (request.position) {
       const position = vector(request.position, ['x', 'y', 'z']);
       if (typeof node.setPosition !== 'function') invalidMutation('node.setPosition is unavailable');
@@ -1217,11 +1236,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
       if (typeof node.setScale !== 'function') invalidMutation('node.setScale is unavailable');
       node.setScale(scale.x, scale.y, scale.z);
     }
-    const after = {
-      ...(request.position ? { position: snapshot(node.position, ['x', 'y', 'z']) } : {}),
-      ...(request.rotation ? { rotation: snapshot(node.rotation, ['x', 'y', 'z', 'w']) } : {}),
-      ...(request.scale ? { scale: snapshot(node.scale, ['x', 'y', 'z']) } : {}),
-    };
+    const after = state();
     return { changed: JSON.stringify(before) !== JSON.stringify(after), target: { nodeUuid: request.uuid }, before, after, runtimeOnly: true };
   }
 
@@ -1397,13 +1412,14 @@ export function inspectCocos(request: BridgeRequest): unknown {
       else if (!point) point = { x: bounds.clippedViewport.x + bounds.clippedViewport.width / 2, y: bounds.clippedViewport.y + bounds.clippedViewport.height / 2 };
       if (target.activeInHierarchy === false) reasons.push('INACTIVE');
       if (bounds.available && bounds.outsideViewport) reasons.push('OUTSIDE_VIEWPORT');
-      const size = dataProperty(components(target).find(component => componentName(component) === 'UITransform') ?? {}, '_contentSize');
+      const size = is2 ? dataProperty(target, '_contentSize') : dataProperty(components(target).find(component => componentName(component) === 'UITransform') ?? {}, '_contentSize');
       if (size && (Number(size.width) === 0 || Number(size.height) === 0)) reasons.push('ZERO_SIZE');
       const button = components(target).find(component => componentName(component) === 'Button');
-      if (button && dataProperty(button, '_interactable') === false) reasons.push('BUTTON_NOT_INTERACTABLE');
+      if (button && (dataProperty(button, '_interactable') ?? dataProperty(button, '_N$interactable')) === false) reasons.push('BUTTON_NOT_INTERACTABLE');
       if (button && dataProperty(button, '_enabled') === false) reasons.push('BUTTON_DISABLED');
       const processor = dataProperty(target, '_eventProcessor');
-      const listens = !!processor && (dataProperty(processor, 'shouldHandleEventTouch') === true || dataProperty(processor, 'shouldHandleEventMouse') === true);
+      // 2.x registers touch and mouse handlers as per-node listeners.
+      const listens = is2 ? !!dataProperty(target, '_touchListener') || !!dataProperty(target, '_mouseListener') : !!processor && (dataProperty(processor, 'shouldHandleEventTouch') === true || dataProperty(processor, 'shouldHandleEventMouse') === true);
       if (!listens && !button) reasons.push('NO_TOUCH_LISTENER');
     }
     if (!point) return { version, ...(target ? { target: { ...summary(target) } } : {}), clickable: false, reasons: reasons.length ? reasons : ['NO_POINT'] };
@@ -1412,7 +1428,12 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const rect = canvas.getBoundingClientRect();
     // Same conversion as the web touch input: canvas-relative, y up, scaled by the engine's device pixel ratio.
     const dpr = Number(cc.screen?.devicePixelRatio ?? root.devicePixelRatio ?? 1);
-    const screenPoint = cc.Vec2 ? new cc.Vec2((point.x - rect.left) * dpr, (rect.top + rect.height - point.y) * dpr) : undefined;
+    let screenPoint = cc.Vec2 ? new cc.Vec2((point.x - rect.left) * dpr, (rect.top + rect.height - point.y) * dpr) : undefined;
+    // 2.x hit tests in view space (design resolution, y up): the same conversion the input manager applies to a mouse event.
+    if (is2 && cc.Vec2 && typeof cc.view?._convertMouseToLocationInView === 'function') {
+      screenPoint = new cc.Vec2(point.x, point.y);
+      cc.view._convertMouseToLocationInView(screenPoint, { left: rect.left, top: rect.top, width: rect.width, height: rect.height });
+    }
     // The global cc namespace does not expose the input singleton, so rebuild the dispatcher's order from the scene:
     // higher camera priority first, then reverse pre-order (later siblings and descendants before what they cover).
     const candidates: Array<{ node: any; order: number; camera: number; windowId: number }> = [];
@@ -1420,6 +1441,11 @@ export function inspectCocos(request: BridgeRequest): unknown {
     walk(node => {
       order++;
       const processor = dataProperty(node, '_eventProcessor');
+      // ponytail: 2.x order ignores cameras and node z-order; it is reverse pre-order, which matches the default scene graph.
+      if (is2) {
+        if (dataProperty(node, '_touchListener') && node.activeInHierarchy !== false) candidates.push({ node, order, camera: 0, windowId: 0 });
+        return;
+      }
       if (!processor || dataProperty(processor, '_isEnabled') !== true || dataProperty(processor, 'shouldHandleEventTouch') !== true || node.activeInHierarchy === false) return;
       // cachedCameraPriority is refreshed only on real dispatch, so ask the batcher, as UITransform.cameraPriority does.
       let camera = 0;
@@ -1438,8 +1464,12 @@ export function inspectCocos(request: BridgeRequest): unknown {
     for (const { node, windowId } of sorted) {
       const transform = components(node).find(component => componentName(component) === 'UITransform');
       let hit = false;
-      // hitTest is the engine's own public query: matrix math and Mask checks, no state change.
-      try { hit = !!screenPoint && typeof transform?.hitTest === 'function' && transform.hitTest(screenPoint, windowId); } catch { hit = false; }
+      // hitTest is the engine's own query: matrix math and Mask checks, no state change. 2.x only has the private Node._hitTest.
+      try {
+        hit = is2
+          ? !!screenPoint && typeof node._hitTest === 'function' && node._hitTest(screenPoint, dataProperty(node, '_touchListener'))
+          : !!screenPoint && typeof transform?.hitTest === 'function' && transform.hitTest(screenPoint, windowId);
+      } catch { hit = false; }
       if (!hit) continue;
       const types = components(node).map(componentName);
       hits.push({ uuid: String(node.uuid ?? ''), name: String(node.name ?? '').slice(0, 200), components: types.slice(0, 20), ...(types.includes('BlockInputEvents') ? { blocksInput: true } : {}) });
@@ -1508,6 +1538,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const systems = (dataProperty(cc.director ?? {}, '_systems') ?? []) as any[];
     const tweens = dataProperty(dataProperty(systems.find(system => system && dataProperty(system, 'actionMgr')) ?? {}, 'actionMgr') ?? {}, '_hashTargets');
     if (tweens instanceof Map) for (const [target, element] of tweens) note('tween', target, { callback: `${(element?.actions ?? []).length} action(s)` });
+    // 2.x runs actions and cc.tween through the director's action manager, keyed by node id.
+    if (is2) for (const element of Object.values(dataProperty(cc.director?.getActionManager?.() ?? {}, '_hashTargets') ?? {}) as any[]) note('tween', element?.target, { callback: `${(element?.actions ?? []).length} action(s)` });
     const emitters: Array<[string, any]> = [['director', cc.director], ['game', cc.game], ['view', cc.view], ['systemEvent', cc.systemEvent]];
     for (const [emitter, value] of emitters) {
       const table = value && typeof value === 'object' ? dataProperty(value, '_callbackTable') : undefined;
@@ -1528,6 +1560,19 @@ export function inspectCocos(request: BridgeRequest): unknown {
       truncated: dead.length >= limit || groups.length > limit,
       truncationReasons: dead.length >= limit || groups.length > limit ? ['NODE_LIMIT'] : [],
     };
+  }
+
+  if (request.action === 'timeScale' && is2) {
+    // 2.x has no director.tick; the scheduler multiplies every update dt (components, animation, tweens) by its own time scale.
+    const scheduler = cc.director?.getScheduler?.();
+    if (typeof scheduler?.getTimeScale !== 'function' || typeof scheduler.setTimeScale !== 'function') invalidMutation('scheduler time scale is unavailable');
+    const before = Number(scheduler.getTimeScale());
+    if (request.scale !== undefined) {
+      if (!finite(request.scale) || request.scale <= 0 || request.scale > 100) invalidMutation('scale must be in (0, 100]');
+      scheduler.setTimeScale(request.scale);
+    }
+    const after = Number(scheduler.getTimeScale());
+    return { changed: before !== after, target: {}, before: { scale: before }, after: { scale: after }, runtimeOnly: true };
   }
 
   if (request.action === 'timeScale') {
@@ -1559,6 +1604,8 @@ export function inspectCocos(request: BridgeRequest): unknown {
   if (request.action === 'dynamicAtlas') {
     const manager = cc.internal?.dynamicAtlasManager ?? cc.dynamicAtlasManager;
     if (!manager || typeof manager !== 'object') return { version, available: false, reason: 'UNSUPPORTED_PUBLIC_API' };
+    // ponytail: 2.x keeps its atlases in a module-private array, so only the manager's public settings and atlas count are reported.
+    if (is2) return { version, available: true, config: { enabled: manager.enabled === true, maxAtlasCount: manager.maxAtlasCount, textureSize: manager.textureSize, maxFrameSize: manager.maxFrameSize }, atlasCount: Number(manager.atlasCount ?? 0), atlases: [], unavailableMetrics: { atlases: 'UNSUPPORTED_PUBLIC_API' } };
     // ponytail: reads private DynamicAtlasManager/Atlas fields verified on 3.7.4-3.8.8; recheck on new engine versions.
     const limit = Math.min(Math.max(request.limit ?? 100, 1), 500);
     const atlases = (dataProperty(manager, '_atlases') ?? []) as any[];
@@ -1728,10 +1775,14 @@ export function inspectCocos(request: BridgeRequest): unknown {
   const finiteOr = (value: unknown, fallback = 0): number => Number.isFinite(Number(value)) ? Number(value) : fallback;
   const sizeOf = (node: any): { width: number; height: number; anchor?: { x: number; y: number } } | undefined => {
     const transform = components(node).find(component => componentName(component) === 'UITransform');
-    const size = transform && dataProperty(transform, '_contentSize');
-    const anchor = transform && dataProperty(transform, '_anchorPoint');
+    const size = is2 ? dataProperty(node, '_contentSize') : transform && dataProperty(transform, '_contentSize');
+    const anchor = is2 ? dataProperty(node, '_anchorPoint') : transform && dataProperty(transform, '_anchorPoint');
     return size ? { width: finiteOr(size.width), height: finiteOr(size.height), ...(anchor ? { anchor: { x: finiteOr(anchor.x), y: finiteOr(anchor.y) } } : {}) } : undefined;
   };
+
+  // 2.x keeps local position, rotation, and scale in one _trs array.
+  const localScale = (node: any): any => { if (!is2) return dataProperty(node, '_lscale'); const trs = dataProperty(node, '_trs'); return trs ? { x: trs[7], y: trs[8], z: trs[9] } : undefined; };
+  const localPosition = (node: any): any => { if (!is2) return dataProperty(node, '_lpos'); const trs = dataProperty(node, '_trs'); return trs ? { x: trs[0], y: trs[1], z: trs[2] } : undefined; };
 
   if (request.action === 'explainVisibility') {
     // Reads backing fields (_active, _layer, _color, _opacity, _visibility) so no getter runs; mirrors what the renderer checks, without rendering.
@@ -1763,18 +1814,23 @@ export function inspectCocos(request: BridgeRequest): unknown {
         opacity *= value / 255;
         if (value === 0) add(reasons, 'ZERO_OPACITY', node, 'UIOpacity is 0');
       }
-      const scale = dataProperty(node, '_lscale');
+      const scale = localScale(node);
       if (scale && (finiteOr(scale.x, 1) === 0 || finiteOr(scale.y, 1) === 0)) add(reasons, 'ZERO_SCALE', node, 'local scale x or y is 0');
+    }
+    // 2.x opacity does not cascade to children; it lives on the node.
+    if (is2) {
+      opacity = finiteOr(dataProperty(target, '_opacity'), 255) / 255;
+      if (opacity === 0) add(reasons, 'ZERO_OPACITY', target, 'node opacity is 0');
     }
     const size = sizeOf(target);
     if (size && (size.width === 0 || size.height === 0)) add(reasons, 'ZERO_SIZE', target, `${size.width}x${size.height}`);
     // Native (JSB) nodes keep _layer in C++ behind an accessor that data reads skip; fall back to the public layer getter, which returns a plain bitmask.
     const layerData = dataProperty(target, '_layer');
-    const layer = Number(typeof layerData === 'number' ? layerData : target.layer);
+    const layer = is2 ? 2 ** finiteOr(dataProperty(target, '_groupIndex')) : Number(typeof layerData === 'number' ? layerData : target.layer);
     const cameras: Array<{ node: string; visibility: number }> = [];
     walk(node => {
       for (const component of components(node)) {
-        if (componentName(component) === 'Camera' && dataProperty(component, '_enabled') !== false && node.activeInHierarchy !== false) cameras.push({ node: String(node.name ?? '').slice(0, 200), visibility: finiteOr(dataProperty(component, '_visibility')) });
+        if (componentName(component) === 'Camera' && dataProperty(component, '_enabled') !== false && node.activeInHierarchy !== false) cameras.push({ node: String(node.name ?? '').slice(0, 200), visibility: finiteOr(is2 ? dataProperty(component, '_cullingMask') : dataProperty(component, '_visibility')) });
       }
     });
     if (Number.isFinite(layer) && cameras.length) {
@@ -1802,7 +1858,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
           if (node === target) { after = true; return; }
           if (!after || checked >= 500 || covering.length >= 3 || node.activeInHierarchy === false || chainOf(node).includes(target)) return;
           const sprite = components(node).find(component => componentName(component) === 'Sprite' && dataProperty(component, '_enabled') !== false && dataProperty(component, '_spriteFrame'));
-          const color = sprite && dataProperty(sprite, '_color');
+          const color = sprite && (is2 ? dataProperty(node, '_color') : dataProperty(sprite, '_color'));
           if (!sprite || !color || finiteOr(color.a, 255) < 255) return;
           checked++;
           const other = nodeBounds(node);
@@ -1838,7 +1894,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
       const flags = finiteOr(dataProperty(widget, '_alignFlags'));
       const edge = (flag: number, field: string, abs: string) => flags & flag ? { value: finiteOr(dataProperty(widget, field)), unit: dataProperty(widget, abs) === false ? 'percent' : 'px' } : undefined;
       const edges = { top: edge(1, '_top', '_isAbsTop'), bottom: edge(4, '_bottom', '_isAbsBottom'), left: edge(8, '_left', '_isAbsLeft'), right: edge(32, '_right', '_isAbsRight'), horizontalCenter: edge(16, '_horizontalCenter', '_isAbsHorizontalCenter'), verticalCenter: edge(2, '_verticalCenter', '_isAbsVerticalCenter') };
-      const alignMode = alignModes[finiteOr(dataProperty(widget, '_alignMode'), -1)] ?? 'UNKNOWN';
+      const alignMode = alignModes[finiteOr(dataProperty(widget, '_alignMode') ?? dataProperty(widget, 'alignMode'), -1)] ?? 'UNKNOWN';
       const reference = dataProperty(widget, '_target');
       widgetInfo = { enabled: dataProperty(widget, '_enabled') !== false, alignMode, ...(reference ? { target: { uuid: String(reference.uuid ?? ''), name: String(reference.name ?? '').slice(0, 200) } } : {}), edges: Object.fromEntries(Object.entries(edges).filter(([, value]) => value)) };
       if (dataProperty(widget, '_enabled') === false) note('WIDGET_DISABLED', 'Widget is disabled, so it does not constrain this node');
@@ -1852,7 +1908,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const parentLayout = parent ? find(parent, 'Layout') : undefined;
     const layoutTypes = ['NONE', 'HORIZONTAL', 'VERTICAL', 'GRID'];
     const resizeModes = ['NONE', 'CONTAINER', 'CHILDREN'];
-    const describeLayout = (layout: any) => ({ type: layoutTypes[finiteOr(dataProperty(layout, '_layoutType'), -1)] ?? 'UNKNOWN', resizeMode: resizeModes[finiteOr(dataProperty(layout, '_resizeMode'), -1)] ?? 'UNKNOWN', spacingX: finiteOr(dataProperty(layout, '_spacingX')), spacingY: finiteOr(dataProperty(layout, '_spacingY')), padding: { left: finiteOr(dataProperty(layout, '_paddingLeft')), right: finiteOr(dataProperty(layout, '_paddingRight')), top: finiteOr(dataProperty(layout, '_paddingTop')), bottom: finiteOr(dataProperty(layout, '_paddingBottom')) }, affectedByScale: dataProperty(layout, '_affectedByScale') === true, enabled: dataProperty(layout, '_enabled') !== false });
+    const describeLayout = (layout: any) => ({ type: layoutTypes[finiteOr((dataProperty(layout, '_layoutType') ?? dataProperty(layout, '_N$layoutType')), -1)] ?? 'UNKNOWN', resizeMode: resizeModes[finiteOr((dataProperty(layout, '_resizeMode') ?? dataProperty(layout, '_resize')), -1)] ?? 'UNKNOWN', spacingX: finiteOr((dataProperty(layout, '_spacingX') ?? dataProperty(layout, '_N$spacingX'))), spacingY: finiteOr((dataProperty(layout, '_spacingY') ?? dataProperty(layout, '_N$spacingY'))), padding: { left: finiteOr((dataProperty(layout, '_paddingLeft') ?? dataProperty(layout, '_N$paddingLeft'))), right: finiteOr((dataProperty(layout, '_paddingRight') ?? dataProperty(layout, '_N$paddingRight'))), top: finiteOr((dataProperty(layout, '_paddingTop') ?? dataProperty(layout, '_N$paddingTop'))), bottom: finiteOr((dataProperty(layout, '_paddingBottom') ?? dataProperty(layout, '_N$paddingBottom'))) }, affectedByScale: (dataProperty(layout, '_affectedByScale') ?? dataProperty(layout, '_N$affectedByScale')) === true, enabled: dataProperty(layout, '_enabled') !== false });
     let parentLayoutInfo: Record<string, unknown> | undefined;
     if (parentLayout) {
       parentLayoutInfo = describeLayout(parentLayout);
@@ -1866,17 +1922,17 @@ export function inspectCocos(request: BridgeRequest): unknown {
       if (ownLayoutInfo.enabled && ownLayoutInfo.resizeMode === 'CONTAINER') note('LAYOUT_FITS_CONTAINER_TO_CHILDREN', 'resizeMode CONTAINER sizes this node to fit its children');
     }
     const label = find(target, 'Label');
-    if (label && [0, 3].includes(finiteOr(dataProperty(label, '_overflow'), -1))) note('LABEL_CONTROLS_SIZE', `Label overflow ${finiteOr(dataProperty(label, '_overflow')) === 0 ? 'NONE' : 'RESIZE_HEIGHT'} sets the size from its text`);
+    if (label && [0, 3].includes(finiteOr((dataProperty(label, '_overflow') ?? dataProperty(label, '_N$overflow')), -1))) note('LABEL_CONTROLS_SIZE', `Label overflow ${finiteOr((dataProperty(label, '_overflow') ?? dataProperty(label, '_N$overflow'))) === 0 ? 'NONE' : 'RESIZE_HEIGHT'} sets the size from its text`);
     const sprite = find(target, 'Sprite');
     if (sprite && finiteOr(dataProperty(sprite, '_sizeMode'), 0) !== 0) note('SPRITE_CONTROLS_SIZE', `Sprite sizeMode ${finiteOr(dataProperty(sprite, '_sizeMode')) === 1 ? 'TRIMMED' : 'RAW'} takes the size from its spriteFrame`);
     let ancestorScale = { x: 1, y: 1 };
     for (const node of chainOf(target).slice(1)) {
-      const scale = dataProperty(node, '_lscale');
+      const scale = localScale(node);
       if (scale) ancestorScale = { x: ancestorScale.x * finiteOr(scale.x, 1), y: ancestorScale.y * finiteOr(scale.y, 1) };
     }
     if (ancestorScale.x !== 1 || ancestorScale.y !== 1) note('SCALED_BY_ANCESTOR', `ancestors scale this node by ${Math.round(ancestorScale.x * 1000) / 1000} x ${Math.round(ancestorScale.y * 1000) / 1000}`);
-    if (!find(target, 'UITransform')) note('NO_UI_TRANSFORM', 'the node has no UITransform, so it has no size, anchor, or Widget/Layout participation');
-    const position = dataProperty(target, '_lpos');
+    if (!is2 && !find(target, 'UITransform')) note('NO_UI_TRANSFORM', 'the node has no UITransform, so it has no size, anchor, or Widget/Layout participation');
+    const position = localPosition(target);
     const bounds = nodeBounds(target);
     return {
       version,
@@ -1920,7 +1976,9 @@ export function inspectCocos(request: BridgeRequest): unknown {
       }
     });
     const systems = (dataProperty(cc.director ?? {}, '_systems') ?? []) as any[];
-    const hash = dataProperty(dataProperty(systems.find(system => system && dataProperty(system, 'actionMgr')) ?? {}, 'actionMgr') ?? {}, '_hashTargets');
+    const hash = is2
+      ? new Map((Object.values(dataProperty(cc.director?.getActionManager?.() ?? {}, '_hashTargets') ?? {}) as any[]).map(element => [element?.target, element]))
+      : dataProperty(dataProperty(systems.find(system => system && dataProperty(system, 'actionMgr')) ?? {}, 'actionMgr') ?? {}, '_hashTargets');
     const tweens: Array<Record<string, unknown>> = [];
     let tweenTotal = 0;
     let tweenActions = 0;
@@ -1986,7 +2044,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
       };
       const onFrame = () => {
         const at = now();
-        if (last !== undefined) samples.push({ ms: at - last, drawCalls: read(device, '_numDrawCalls'), triangles: read(device, '_numTris') });
+        if (last !== undefined) samples.push({ ms: at - last, drawCalls: is2 ? read(cc.renderer, 'drawCalls') : read(device, '_numDrawCalls'), triangles: is2 ? undefined : read(device, '_numTris') });
         last = at;
         if (samples.length >= wanted) finish(false);
       };
