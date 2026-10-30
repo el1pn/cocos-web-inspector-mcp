@@ -208,12 +208,19 @@ export type EmulationRequest = {
   orientation?: 'portrait' | 'landscape' | undefined;
   cpuSlowdown?: number | undefined;
   network?: NetworkProfile | undefined;
+  latencyMs?: number | undefined;
+  downloadKbps?: number | undefined;
+  uploadKbps?: number | undefined;
   reload?: boolean | undefined;
 };
 type EmulationState = {
   device?: { preset?: DevicePreset; width: number; height: number; deviceScaleFactor: number; mobile: boolean; orientation: 'portrait' | 'landscape'; userAgent?: string; platform?: string };
   cpuSlowdown?: number;
   network?: NetworkProfile;
+  // Custom overrides on top of the profile; a new profile clears them.
+  latencyMs?: number;
+  downloadKbps?: number;
+  uploadKbps?: number;
 };
 // Chrome drops every override when the owning CDP session detaches, so the session lives as long as the emulation.
 const emulations = new WeakMap<Page, { session: CDPSession; state: EmulationState }>();
@@ -236,7 +243,15 @@ export async function emulateDevice(page: Page, request: EmulationRequest): Prom
     if (request.orientation && !base) throw new Error('Invalid mutation: orientation needs a preset or width and height');
     if (base) after.device = { ...base, orientation: request.orientation ?? (base === before.device ? before.device.orientation : 'portrait') };
     if (request.cpuSlowdown !== undefined) after.cpuSlowdown = request.cpuSlowdown;
-    if (request.network) after.network = request.network;
+    if (request.network) {
+      after.network = request.network;
+      delete after.latencyMs;
+      delete after.downloadKbps;
+      delete after.uploadKbps;
+    }
+    if (request.latencyMs !== undefined) after.latencyMs = request.latencyMs;
+    if (request.downloadKbps !== undefined) after.downloadKbps = request.downloadKbps;
+    if (request.uploadKbps !== undefined) after.uploadKbps = request.uploadKbps;
     const session = current?.session ?? await page.context().newCDPSession(page);
     emulations.set(page, { session, state: after });
     await applyEmulation(session, after);
@@ -280,7 +295,14 @@ async function applyEmulation(session: CDPSession, state: EmulationState): Promi
     ? { userAgent: device.userAgent, platform: device.platform ?? '' }
     : { userAgent: (await session.send('Browser.getVersion')).userAgent });
   await session.send('Emulation.setCPUThrottlingRate', { rate: state.cpuSlowdown ?? 1 });
-  await session.send('Network.emulateNetworkConditions', networkProfiles[state.network ?? 'online']);
+  const profile = networkProfiles[state.network ?? 'online'];
+  // Kilobits per second to the bytes per second CDP expects.
+  await session.send('Network.emulateNetworkConditions', {
+    offline: profile.offline,
+    latency: state.latencyMs ?? profile.latency,
+    downloadThroughput: state.downloadKbps === undefined ? profile.downloadThroughput : state.downloadKbps * 125,
+    uploadThroughput: state.uploadKbps === undefined ? profile.uploadThroughput : state.uploadKbps * 125,
+  });
 }
 
 export function inspectCocosPage(): unknown {

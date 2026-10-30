@@ -537,6 +537,7 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     // cocos_emulate_device waits for the canvas resize, so a click right after it lands on the new layout.
     assert.equal((await call(client, 'cocos_click_node', { pageUrl, uuid: toggle.uuid })).clicked, true);
     assert.equal((await call(client, 'cocos_drag_node', { pageUrl, uuid: panelUuid, dx: 30, dy: 0, steps: 3, durationMs: 0 })).dragged, true);
+    assert.deepEqual((await call(client, 'cocos_emulate_device', { pageUrl, network: 'online', latencyMs: 300, downloadKbps: 500 })).after.latencyMs, 300);
     assert.deepEqual((await call(client, 'cocos_emulate_device', { pageUrl, reset: true })).after, {});
     // Reset clears every metrics override on the page, including Playwright's own viewport, back to the window size; Chrome applies it asynchronously.
     await page.waitForFunction(() => innerWidth !== 844, undefined, { timeout: 5_000 });

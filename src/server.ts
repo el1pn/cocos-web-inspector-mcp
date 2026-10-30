@@ -376,7 +376,7 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     }, input => execute({ action: 'showStats', visible: input.visible }, input.pageUrl));
 
     if (web) server.registerTool('cocos_emulate_device', {
-      description: 'Emulate a mobile device (viewport, DPR, touch, user agent, orientation) and optionally slow the CPU or network, like the Chrome device toolbar. Settings merge across calls and last until reset or server disconnect; reload lets the game re-detect touch and user agent.',
+      description: 'Emulate a mobile device (viewport, DPR, touch, user agent, orientation) and optionally slow the CPU or network (preset `network` such as offline or slow-3g, plus custom latencyMs, downloadKbps, uploadKbps; packet loss is not supported by Chrome for HTTP), like the Chrome device toolbar. Settings merge across calls and last until reset or server disconnect; reload lets the game re-detect touch and user agent.',
       inputSchema: obj({
         pageUrl,
         reset: z.boolean().optional(),
@@ -388,6 +388,9 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
         orientation: z.enum(['portrait', 'landscape']).optional(),
         cpuSlowdown: z.number().min(1).max(20).optional(),
         network: z.enum(networkProfileNames).optional(),
+        latencyMs: z.number().min(0).max(60_000).optional(),
+        downloadKbps: z.number().min(1).max(1_000_000).optional(),
+        uploadKbps: z.number().min(1).max(1_000_000).optional(),
         reload: z.boolean().optional(),
       }).strict()
         .refine(value => (value.width === undefined) === (value.height === undefined), 'Provide width and height together')
