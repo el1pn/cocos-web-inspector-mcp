@@ -2,6 +2,18 @@
 
 All notable changes are documented here.
 
+## 2.6.0
+
+### Added
+
+- `--allow-launch` registers `cocos_open_page` and `cocos_close_page`, so an agent can open and close the game itself. The agent supplies only a loopback URL; the Chrome path, port, and a throwaway profile come from the server. Only pages and the Chrome the server opened are closed, and that Chrome exits with its last page or on shutdown.
+- Without `--cdp-endpoint` or `COCOS_CDP_ENDPOINT`, each launch uses a free loopback port, so concurrent sessions never share a browser. An explicit endpoint keeps its fixed port and reuses a Chrome already running there.
+- `cocos_emulate_device` accepts custom `latencyMs`, `downloadKbps`, and `uploadKbps` besides the `network` presets.
+
+### Changed
+
+- Connection errors name the working launch command, `npx --yes cocos-web-inspector-mcp launch <game-url>`.
+
 ## 2.5.0
 
 ### Added
