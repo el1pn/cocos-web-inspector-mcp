@@ -1,10 +1,10 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 import { BrowserConnection, InspectorError, sanitizeUrl, validateLocalUrl } from './browser.js';
 import { devicePresetNames, emulateDevice, inspectCocosPage, networkProfileNames, type DevicePreset, type NetworkProfile } from './bridge.js';
+import { chromePath, probe } from './chrome.js';
 import { forwardInspector, NativeConnection } from './native.js';
 
 const write = (line: string) => process.stdout.write(`${line}\n`);
@@ -23,27 +23,6 @@ function flags(args: string[], names: string[], booleans: string[] = []): { valu
     else positional.push(arg);
   }
   return { values, positional };
-}
-
-function chromePath(override?: string): string {
-  const candidates = override ? [override] : process.env.CHROME_PATH ? [process.env.CHROME_PATH] : process.platform === 'darwin'
-    ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium']
-    : process.platform === 'win32'
-      ? [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean).map(base => join(base!, 'Google', 'Chrome', 'Application', 'chrome.exe'))
-      : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
-  const found = candidates.find(candidate => existsSync(candidate));
-  if (!found) throw new Error(`Chrome not found (checked ${candidates.join(', ')}); pass --chrome-path or set CHROME_PATH`);
-  return found;
-}
-
-async function probe(endpoint: string): Promise<{ status: 'ok'; browser: string } | { status: 'http'; code: number } | { status: 'down'; message: string }> {
-  try {
-    const response = await fetch(new URL('/json/version', endpoint), { signal: AbortSignal.timeout(3_000) });
-    if (!response.ok) return { status: 'http', code: response.status };
-    return { status: 'ok', browser: String(((await response.json()) as { Browser?: unknown }).Browser ?? 'unknown') };
-  } catch (error) {
-    return { status: 'down', message: error instanceof Error ? (error.cause instanceof Error ? error.cause.message : error.message) : 'unknown error' };
-  }
 }
 
 function listener(port: string): string | undefined {

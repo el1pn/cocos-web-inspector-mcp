@@ -12,7 +12,7 @@ The current MVP supports:
 - Scene, node, component, and public-property inspection
 - Temporary DOM-only node highlighting
 
-By default it does not edit Cocos game state, launch browsers, expose browser console/network/storage data, or support Firefox/WebKit. Runtime mutations require the explicit `--allow-runtime-mutation` startup flag and affect the attached web build only. Console, network, and storage tools require the separate `--allow-browser-data` flag.
+By default it does not edit Cocos game state, launch browsers (`--allow-launch` opts in), expose browser console/network/storage data, or support Firefox/WebKit. Runtime mutations require the explicit `--allow-runtime-mutation` startup flag and affect the attached web build only. Console, network, and storage tools require the separate `--allow-browser-data` flag.
 
 ## Requirements
 
@@ -27,7 +27,7 @@ npx --yes cocos-web-inspector-mcp launch http://localhost:7456/
 npx --yes cocos-web-inspector-mcp launch http://localhost:7456/ --port 9223 --device iphone-14 --landscape --cpu-slowdown 4 --network fast-3g
 ```
 
-`launch` options: `--port` (default `9222`), `--profile <dir>` (default a per-port directory under the system temp folder), `--chrome-path` (or `CHROME_PATH`), and the `cocos_emulate_device` settings `--device`, `--landscape`, `--cpu-slowdown`, and `--network`. Chrome drops emulation when its controlling CDP session closes, so with emulation flags the command stays attached; press Ctrl+C to close Chrome. The MCP server itself never launches a browser.
+`launch` options: `--port` (default `9222`), `--profile <dir>` (default a per-port directory under the system temp folder), `--chrome-path` (or `CHROME_PATH`), and the `cocos_emulate_device` settings `--device`, `--landscape`, `--cpu-slowdown`, and `--network`. Chrome drops emulation when its controlling CDP session closes, so with emulation flags the command stays attached; press Ctrl+C to close Chrome. The MCP server itself launches a browser only with `--allow-launch` (see below).
 
 Check a setup step by step, with a fix for each failure:
 
@@ -142,7 +142,7 @@ The endpoint may instead be provided through the MCP process environment:
 }
 ```
 
-Add `--allow-runtime-mutation` for debugger tools, `--allow-browser-data` for console, network, and storage tools, and `--allow-method-call` for `cocos_call_method`; each flag registers only its own tools.
+Add `--allow-runtime-mutation` for debugger tools, `--allow-browser-data` for console, network, and storage tools, `--allow-method-call` for `cocos_call_method`, and `--allow-launch` for `cocos_open_page` and `cocos_close_page`; each flag registers only its own tools.
 
 ## Tools
 
@@ -186,6 +186,8 @@ All tool input objects are strict. Unknown fields are rejected. Inspection tools
 | `cocos_frame_profile` | Sample real frames and report frame time (avg, p50, p95, max), fps, spikes, worst frames, and draw call and triangle ranges. The game must be running. | `pageUrl?`; `frames?` `2..600`, default `120`; `timeoutMs?` `100..30000`, default `10000` |
 | `cocos_dynamic_atlas` | Report the dynamic atlas: config, each page with its packed textures (position, size, a node that draws each), fill ratio and GPU bytes, and why visible sprites stayed out. | `pageUrl?`; `limit?` `1..500`, default `100` |
 | `cocos_asset_report` | List assets in the asset cache with type, `refCount`, bundle, texture GPU bytes, and a `status`: `used` (a live renderer references it), `dependency` (reached from one, the scene, or a persist-root node), `builtin`, or `unused`. Unused assets sort first. | `pageUrl?`; `type?` asset class such as `Texture2D`; `unusedOnly?`; `limit?` `1..500`, default `100` |
+| `cocos_open_page` | Open a loopback game URL in Chrome and return the `pageUrl` to use. Starts a dedicated Chrome (throwaway profile, port from `--cdp-endpoint`) when none is running there, otherwise opens a tab in it. Registered only with `--allow-launch`. | `url` (HTTP(S) loopback) |
+| `cocos_close_page` | Close a page this server opened; the Chrome it started exits with its last page. Refuses other pages. Registered only with `--allow-launch`. | `pageUrl` |
 | `cocos_call_method` | Call one public method of a node or component and return its bounded result or thrown error. Runs game code. Registered only with `--allow-method-call`. | `pageUrl?`; node `uuid`; `componentUuid?` (omit to call on the node); `method` identifier; `args?` up to 20 JSON values, where `{"$node": uuid}`, `{"$component": uuid}`, and `{"$asset": uuid}` pass live objects; `awaitMs?` `0..30000` waits for a returned promise; `maxDepth?` `0..6`, default `2` |
 | `cocos_console_messages` | Recent console messages and uncaught page errors since the server attached, newest last, with secrets masked. Registered only with `--allow-browser-data`. | `pageUrl?`; `types?` (`log`, `debug`, `info`, `error`, `warning`, `assert`, `trace`, `pageerror`); `textContains?`; `limit?` `1..200`, default `50` |
 | `cocos_network_requests` | Recent requests since the server attached: id, method, masked URL, resource type, status, failure, duration. | `pageUrl?`; `urlContains?`; `resourceType?`; `failedOnly?` (network failures and HTTP 4xx/5xx); `limit?` `1..200`, default `50` |
@@ -349,3 +351,11 @@ This is a clean implementation, not a fork. No source module was copied from the
 - [CC Inspector](https://github.com/qq790git/cc-inspector), MIT, inspected at `ef5ef0ae033ee6a6ae496cf566fe5d91cf05aafd`.
 
 They informed MCP tool design, CDP connection constraints, Cocos runtime discovery, bounded responses, and highlight behavior. Their license files remain in separate read-only reference clones and are not redistributed here because this repository contains independently written code.
+
+## Agent-managed Chrome (`--allow-launch`)
+
+`--allow-launch` lets the agent open and close the game itself. `cocos_open_page` takes only a loopback URL; the Chrome binary comes from `CHROME_PATH` or the platform default, the port from `--cdp-endpoint` (must be `127.0.0.1` or `localhost`, port 1024 or higher), and the profile is a fresh temp directory removed on exit. `cocos_close_page` only closes pages opened by this server, and the Chrome it started is killed with its last page or on shutdown. A Chrome already running on the endpoint is reused and never killed. Not available with `--native-endpoint`.
+
+```powershell
+claude mcp add cocos-web-inspector -- npx -y cocos-web-inspector-mcp --allow-launch
+```

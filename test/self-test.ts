@@ -8,6 +8,7 @@ import { captureNode, fitsImage, fitsResponse, inspectCocos, runBridge } from '.
 import { redactBody, redactHeaders, redactText, redactUrl } from '../src/browser-data.js';
 import { cropPng, inspectorPort, NativeConnection, nativeNetworkRequest, nativeNetworkRequests, parseCocosLogcat } from '../src/native.js';
 import { createServer } from '../src/server.js';
+import { ChromeLauncher } from '../src/chrome.js';
 
 function fakeBrowser(pageUrl = 'http://localhost:3000') {
   let connected = true;
@@ -1126,5 +1127,31 @@ test('native network capture records XHR and WebSocket traffic and keeps the gam
   } finally {
     Object.assign(globalThis, previous);
     delete (globalThis as any).__cocosWebInspectorNetwork;
+  }
+});
+
+test('launch tools register only with a launcher and refuse unowned pages', async () => {
+  const browser = new BrowserConnection('http://127.0.0.1:9222');
+  const names = async (options: Parameters<typeof createServer>[1]) => {
+    const server = createServer(browser, options);
+    const client = new Client({ name: 'self-test', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const tools = (await client.listTools()).tools.map(tool => tool.name);
+    const closed = await client.callTool({ name: 'cocos_close_page', arguments: { pageUrl: 'http://127.0.0.1:7456/' } }).catch(() => undefined);
+    await Promise.allSettled([client.close(), server.close()]);
+    return { tools, closed: closed as any };
+  };
+  try {
+    assert.equal((await names({})).tools.some(name => name.startsWith('cocos_open_') || name === 'cocos_close_page'), false);
+    const launcher = new ChromeLauncher('http://127.0.0.1:9222', browser);
+    const withLauncher = await names({ launcher });
+    assert.ok(withLauncher.tools.includes('cocos_open_page') && withLauncher.tools.includes('cocos_close_page'));
+    assert.equal(withLauncher.closed.isError, true);
+    assert.equal(withLauncher.closed.structuredContent.code, 'PAGE_NOT_FOUND');
+    assert.throws(() => new ChromeLauncher('http://192.168.1.2:9222', browser));
+    await assert.rejects(launcher.open('http://example.com/'), /loopback|local/i);
+  } finally {
+    await browser.close();
   }
 });

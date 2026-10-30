@@ -38,9 +38,11 @@ The process is a stdio MCP server with one path from tool input to browser inspe
 
 `src/native.ts` is the alternative to `BrowserConnection` for `--native-endpoint`: it runs the same self-contained `inspectCocos` source through `Runtime.evaluate` on a Cocos native V8 inspector, one WebSocket per call because that inspector allows a single session. Native click, drag, type, console, and forward run `adb` with fixed numeric or validated arguments, never free text. Native network capture (`nativeNetwork`) is a second self-contained in-page function: it wraps XHR and WebSocket in the game on first use and keeps a bounded ring in game memory. `createServer` with `native: true` swaps those in and omits tools that need a page, DOM, or the JS batcher.
 
+`src/chrome.ts` holds Chrome discovery, the CDP probe, and `ChromeLauncher`, the opt-in `--allow-launch` lifecycle behind `cocos_open_page` and `cocos_close_page`.
+
 `src/browser-data.ts` holds the opt-in console, network, and storage readers and their redaction; they use Playwright page APIs, not the in-page bridge.
 
-`src/cli.ts` holds the user-facing `launch` and `doctor` commands, loaded by `src/index.ts` only when the first argument names one. They reuse the browser and bridge modules; the MCP server path never launches a browser. Device emulation (`emulateDevice` in `src/bridge.ts`) runs over a per-page CDP session kept open for the life of the emulation, because Chrome drops overrides when that session detaches.
+`src/cli.ts` holds the user-facing `launch` and `doctor` commands, loaded by `src/index.ts` only when the first argument names one. They reuse the browser and bridge modules; the MCP server path launches a browser only through `ChromeLauncher` with `--allow-launch`. Device emulation (`emulateDevice` in `src/bridge.ts`) runs over a per-page CDP session kept open for the life of the emulation, because Chrome drops overrides when that session detaches.
 
 `inspectCocos` crosses the Playwright serialization boundary. It must remain self-contained: do not reference module-level helpers, imported values, or Node-only APIs from inside it. `BridgeRequest` is the shared discriminated union between MCP registration and in-page dispatch.
 
@@ -51,6 +53,7 @@ This server intentionally has a narrow, read-only inspection surface. Preserve t
 - CDP endpoints allow only HTTP(S)/WS(S) loopback URLs; page targets allow only HTTP(S) loopback URLs.
 - Page selection requires an exact URL when multiple eligible pages exist.
 - Tool schemas are strict and reject unknown fields.
+- The server spawns a process only through `ChromeLauncher` with `--allow-launch`: the agent supplies one loopback page URL, never a binary path, flag, port, or profile. It closes only pages and the Chrome it opened itself.
 - Do not add arbitrary evaluation or cookie-value tools. `cocos_call_method` is the only general invocation tool: it registers only with `--allow-method-call`, refuses private, secret-like, `constructor`, and `destroy` members, and returns results through the shared serializer. Console, network, and storage tools live in `src/browser-data.ts`, register only with `--allow-browser-data`, and must redact before returning: secret-like keys, auth and cookie headers, JWTs, bearer tokens, and every cookie value.
 - Property serialization must not invoke getters. It skips private-prefixed and secret-like keys, functions, symbols, and cycles.
 - Traversal, properties, strings, highlight duration, and total encoded responses remain bounded. `runBridge` enforces the final 200,000-byte ceiling.

@@ -115,6 +115,11 @@ export class BrowserConnection {
     return pages[0]!;
   }
 
+  async newPage(): Promise<Page> {
+    const browser = await this.#connect();
+    return (browser.contexts()[0] ?? await browser.newContext()).newPage();
+  }
+
   async close(): Promise<void> {
     this.#closed = true;
     const current = this.#browser;
@@ -154,8 +159,8 @@ export class BrowserConnection {
       const hint = /\b404\b/.test(message)
         ? '; port is likely held by Chrome built-in remote debugging (chrome://inspect/#remote-debugging), which has no /json/version: turn it off or use another port, check with lsof -nP -iTCP:<port> -sTCP:LISTEN'
         : '';
-      const launch = /ECONNREFUSED/.test(message) ? '; no Chromium is listening there: start one with --remote-debugging-port=<port> --user-data-dir=<dir>, or point the server at the right port with --cdp-endpoint / COCOS_CDP_ENDPOINT' : '';
-      const nonStandard = /Browser context management is not supported|Browser\.setDownloadBehavior/.test(message) ? '; the endpoint is not a standard Chromium remote-debugging browser (an embedded or custom CDP host): start a dedicated Chromium with --remote-debugging-port=<port> --user-data-dir=<dir> or run `cocos-web-inspector launch`, then pass --cdp-endpoint' : '';
+      const launch = /ECONNREFUSED/.test(message) ? '; no Chromium is listening there: run `npx --yes cocos-web-inspector-mcp launch <game-url>` (or call cocos_open_page when it is available), start one with --remote-debugging-port=<port> --user-data-dir=<dir>, or point the server at the right port with --cdp-endpoint / COCOS_CDP_ENDPOINT' : '';
+      const nonStandard = /Browser context management is not supported|Browser\.setDownloadBehavior/.test(message) ? '; the endpoint is not a standard Chromium remote-debugging browser (an embedded or custom CDP host): start a dedicated Chromium with --remote-debugging-port=<port> --user-data-dir=<dir> or run `npx --yes cocos-web-inspector-mcp launch <game-url>`, then pass --cdp-endpoint' : '';
       throw new InspectorError('CDP_UNAVAILABLE', `Unable to connect to Chromium CDP at ${sanitizeUrl(this.endpoint)}: ${message}${hint}${launch}${nonStandard}`);
     });
     this.#connecting = connecting;

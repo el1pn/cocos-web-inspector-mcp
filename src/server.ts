@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
+import type { ChromeLauncher } from './chrome.js';
 import { nativeCaptureNode, nativeClick,nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativePressKey, nativeTypeText, type NativeConnection } from './native.js';
 import { consoleMessages, networkRequest, networkRequests, storage } from './browser-data.js';
 import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fitsResponse, inspectCocosPage, networkProfileNames, keyPattern, pressKey, runBridge, typeText, type BridgeRequest } from './bridge.js';
@@ -84,7 +85,7 @@ function failure(error: unknown) {
   return { ...response({ code, message }), isError: true };
 }
 
-export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowMethodCall?: boolean; native?: boolean } = {}): McpServer {
+export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowMethodCall?: boolean; launcher?: ChromeLauncher; native?: boolean } = {}): McpServer {
   const server = new McpServer({ name: 'cocos-web-inspector-mcp', version });
   // A native (JSB) runtime has no page: screenshots and device emulation need a browser,
   // the DOM overlays draw nothing, the 2D batcher runs in C++ where analyze_batches cannot observe it,
@@ -459,6 +460,34 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     inputSchema: obj({ pageUrl, type: blank(z.string().min(1).max(120)), unusedOnly: z.boolean().optional(), limit: z.number().int().min(1).max(500).optional() }),
     annotations: readOnly,
   }, input => execute({ action: 'assetReport', type: input.type, unusedOnly: input.unusedOnly, limit: input.limit }, input.pageUrl));
+
+  if (options.launcher && web) {
+    const launcher = options.launcher;
+    server.registerTool('cocos_open_page', {
+      description: 'Open a loopback game URL in Chrome and return the page URL to pass as pageUrl. Starts a dedicated Chrome with a throwaway profile when none is running on the CDP endpoint; otherwise opens a new tab in it. Only the URL is configurable.',
+      inputSchema: obj({ url: z.url() }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    }, async input => {
+      try {
+        const { page, launched } = await launcher.open(input.url);
+        return response({ pageUrl: sanitizeUrl(page.url()), launched });
+      } catch (error) {
+        return failure(error);
+      }
+    });
+
+    server.registerTool('cocos_close_page', {
+      description: 'Close a page opened by cocos_open_page. The Chrome this server started exits with its last page. Pages and browsers it did not open are refused.',
+      inputSchema: obj({ pageUrl: z.url() }),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    }, async input => {
+      try {
+        return response(await launcher.closePage(input.pageUrl));
+      } catch (error) {
+        return failure(error);
+      }
+    });
+  }
 
   if (options.allowMethodCall) {
     // Not finiteNumber: method arguments include bitmasks such as node layers (1 << 25), which that +-1e6 transform bound rejects.
