@@ -1,10 +1,20 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Page } from 'playwright-core';
 import { InspectorError, sanitizeUrl, validateLocalUrl, type BrowserConnection } from './browser.js';
+
+const freePort = () => new Promise<number>((resolve, reject) => {
+  const probeServer = createServer();
+  probeServer.once('error', reject);
+  probeServer.listen(0, '127.0.0.1', () => {
+    const { port } = probeServer.address() as AddressInfo;
+    probeServer.close(() => resolve(port));
+  });
+});
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -32,15 +42,20 @@ export async function probe(endpoint: string): Promise<{ status: 'ok'; browser: 
 // Opt-in (--allow-launch) page and browser lifecycle. The agent supplies only a loopback page URL: the Chrome path comes from
 // CHROME_PATH or the platform default, the port from the CDP endpoint, and the profile is a fresh temp directory.
 // Only pages opened here can be closed here, and the Chrome this process spawned is killed with its last page or on shutdown.
+// With an explicit endpoint the port is fixed and a Chrome already listening there is reused. Without one (dynamic), every
+// launch takes a free port and points the connection at it, so concurrent server sessions never share or fight over a Chrome.
 export class ChromeLauncher {
   #child: ChildProcess | undefined;
   #profile: string | undefined;
   #owned = new Set<Page>();
   #lock: Promise<unknown> = Promise.resolve();
-  readonly #port: number;
-  readonly #origin: string;
+  #port = 0;
+  #origin = '';
+  readonly #dynamic: boolean;
 
-  constructor(endpoint: string, private readonly browser: BrowserConnection) {
+  constructor(endpoint: string | undefined, private readonly browser: BrowserConnection) {
+    this.#dynamic = endpoint === undefined;
+    if (endpoint === undefined) return;
     const url = validateLocalUrl(endpoint);
     this.#port = Number(url.port || 80);
     if (!['127.0.0.1', 'localhost'].includes(url.hostname) || this.#port < 1_024) throw new Error('--allow-launch needs a --cdp-endpoint on 127.0.0.1 or localhost with a port from 1024 to 65535');
@@ -71,6 +86,7 @@ export class ChromeLauncher {
     const profile = this.#profile;
     this.#child = this.#profile = undefined;
     this.#owned.clear();
+    if (this.#dynamic) this.#origin = '';
     if (child && child.exitCode === null) {
       const exited = new Promise(resolve => child.once('exit', resolve));
       child.kill();
@@ -81,6 +97,12 @@ export class ChromeLauncher {
 
   async #open(rawUrl: string): Promise<{ page: Page; launched: boolean }> {
     const url = validateLocalUrl(rawUrl, true).href;
+    if (this.#dynamic && this.#child && this.#child.exitCode !== null) await this.close();
+    if (this.#dynamic && !this.#child) {
+      this.#port = await freePort();
+      this.#origin = `http://127.0.0.1:${this.#port}`;
+      await this.browser.setEndpoint(this.#origin);
+    }
     const state = await probe(this.#origin);
     if (state.status === 'http') throw new InspectorError('CDP_UNAVAILABLE', `Port ${this.#port} answers HTTP ${state.code} but is not a Chromium remote-debugging endpoint; free the port or use another --cdp-endpoint`);
     let page: Page;

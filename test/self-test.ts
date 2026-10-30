@@ -1155,3 +1155,14 @@ test('launch tools register only with a launcher and refuse unowned pages', asyn
     await browser.close();
   }
 });
+
+test('launcher without an endpoint accepts dynamic ports and the connection can be repointed', async () => {
+  const browser = new BrowserConnection('http://127.0.0.1:9222');
+  try {
+    assert.doesNotThrow(() => new ChromeLauncher(undefined, browser));
+    await browser.setEndpoint('http://127.0.0.1:54321');
+    await assert.rejects(browser.setEndpoint('http://example.com:9222'));
+  } finally {
+    await browser.close();
+  }
+});

@@ -354,7 +354,7 @@ They informed MCP tool design, CDP connection constraints, Cocos runtime discove
 
 ## Agent-managed Chrome (`--allow-launch`)
 
-`--allow-launch` lets the agent open and close the game itself. `cocos_open_page` takes only a loopback URL; the Chrome binary comes from `CHROME_PATH` or the platform default, the port from `--cdp-endpoint` (must be `127.0.0.1` or `localhost`, port 1024 or higher), and the profile is a fresh temp directory removed on exit. `cocos_close_page` only closes pages opened by this server, and the Chrome it started is killed with its last page or on shutdown. A Chrome already running on the endpoint is reused and never killed. Not available with `--native-endpoint`.
+`--allow-launch` lets the agent open and close the game itself. `cocos_open_page` takes only a loopback URL; the Chrome binary comes from `CHROME_PATH` or the platform default, and the profile is a fresh temp directory removed on exit. Without `--cdp-endpoint` (or `COCOS_CDP_ENDPOINT`) every launch picks a free port, so concurrent sessions each get their own Chrome. With an explicit endpoint (`127.0.0.1` or `localhost`, port 1024 or higher) the port is fixed. `cocos_close_page` only closes pages opened by this server, and the Chrome it started is killed with its last page or on shutdown. With an explicit endpoint, a Chrome already running there is reused and never killed; a port held by something else is an error. Not available with `--native-endpoint`.
 
 ```powershell
 claude mcp add cocos-web-inspector -- npx -y cocos-web-inspector-mcp --allow-launch

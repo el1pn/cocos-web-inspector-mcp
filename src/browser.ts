@@ -67,7 +67,7 @@ export class BrowserConnection {
   #closed = false;
 
   constructor(
-    private readonly endpoint: string,
+    private endpoint: string,
     private readonly timeout = 10_000,
     private readonly connectOverCDP: (endpoint: string, options: { timeout: number; noDefaults?: boolean }) => Promise<Browser> =
       (target, options) => chromium.connectOverCDP(target, options),
@@ -113,6 +113,18 @@ export class BrowserConnection {
       throw new InspectorError('MULTIPLE_PAGES', `Multiple localhost pages found; pass pageUrl: ${choices}`);
     }
     return pages[0]!;
+  }
+
+  // Points a not-yet-connected or idle connection at another loopback endpoint and drops the old CDP session.
+  async setEndpoint(endpoint: string): Promise<void> {
+    validateLocalUrl(endpoint);
+    if (endpoint === this.endpoint) return;
+    this.endpoint = endpoint;
+    const pending = this.#connecting;
+    await pending?.catch(() => undefined);
+    const stale = this.#browser;
+    this.#browser = undefined;
+    await stale?.close().catch(() => {});
   }
 
   async newPage(): Promise<Page> {

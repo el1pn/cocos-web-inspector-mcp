@@ -5,13 +5,14 @@ import { ChromeLauncher } from './chrome.js';
 import { NativeConnection } from './native.js';
 import { createServer } from './server.js';
 
-function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: string | undefined; allowRuntimeMutation: boolean; allowBrowserData: boolean; allowMethodCall: boolean; allowLaunch: boolean } {
+function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: string | undefined; allowRuntimeMutation: boolean; allowBrowserData: boolean; allowMethodCall: boolean; allowLaunch: boolean; explicitEndpoint: boolean } {
   let endpoint = process.env.COCOS_CDP_ENDPOINT ?? 'http://127.0.0.1:9222';
   let nativeEndpoint: string | undefined;
   let allowRuntimeMutation = false;
   let allowBrowserData = false;
   let allowMethodCall = false;
   let allowLaunch = false;
+  let explicitEndpoint = !!process.env.COCOS_CDP_ENDPOINT;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (arg === '--allow-runtime-mutation') {
@@ -34,6 +35,7 @@ function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: st
       const value = args[++index];
       if (!value) throw new Error('--cdp-endpoint requires a value');
       endpoint = value;
+      explicitEndpoint = true;
       continue;
     }
     if (arg === '--native-endpoint') {
@@ -43,7 +45,7 @@ function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: st
     }
     if (arg.startsWith('-')) throw new Error(`Unknown argument: ${arg}`);
   }
-  return { endpoint, nativeEndpoint, allowRuntimeMutation, allowBrowserData, allowMethodCall, allowLaunch };
+  return { endpoint, nativeEndpoint, allowRuntimeMutation, allowBrowserData, allowMethodCall, allowLaunch, explicitEndpoint };
 }
 
 async function main(): Promise<void> {
@@ -52,7 +54,7 @@ async function main(): Promise<void> {
   const options = optionsFromArgs(process.argv.slice(2));
   if (options.allowLaunch && options.nativeEndpoint) throw new Error('--allow-launch cannot be combined with --native-endpoint');
   const browser = options.nativeEndpoint ? new NativeConnection(options.nativeEndpoint) : new BrowserConnection(options.endpoint);
-  const launcher = options.allowLaunch && browser instanceof BrowserConnection ? new ChromeLauncher(options.endpoint, browser) : undefined;
+  const launcher = options.allowLaunch && browser instanceof BrowserConnection ? new ChromeLauncher(options.explicitEndpoint ? options.endpoint : undefined, browser) : undefined;
   const server = createServer(browser, { allowRuntimeMutation: options.allowRuntimeMutation, allowBrowserData: options.allowBrowserData, allowMethodCall: options.allowMethodCall, ...(launcher && { launcher }), native: !!options.nativeEndpoint });
   let closing = false;
   const close = async () => {
