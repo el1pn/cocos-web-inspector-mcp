@@ -57,6 +57,7 @@ async function launch(args: string[]): Promise<void> {
     `--user-data-dir=${profile}`,
     '--no-first-run',
     '--no-default-browser-check',
+    '--disable-sync',
     url,
   ], { stdio: 'ignore' });
   const exited = new Promise<void>(resolve => chrome.once('exit', () => resolve()));

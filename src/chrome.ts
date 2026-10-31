@@ -135,6 +135,7 @@ export class ChromeLauncher {
       `--user-data-dir=${this.#profile}`,
       '--no-first-run',
       '--no-default-browser-check',
+      '--disable-sync',
       url,
     ], { stdio: 'ignore' });
     this.#child = child;
