@@ -365,9 +365,30 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.ok(await page.evaluate(() => (globalThis as any).__textChanged > 0), 'typing must fire text-changed');
     assert.equal(await page.evaluate(() => (globalThis as any).__submitted), true, 'submit must fire editing-return');
     assert.deepEqual((await call(client, 'cocos_type_text', { pageUrl, uuid: editUuid, text: 'bye' })).after, { string: 'bye' }, 'typing replaces existing text');
+    // A transparent DOM blocker must not let typing overwrite the previously focused EditBox.
+    const passwordBounds = (await call(client, 'cocos_get_node_bounds', { pageUrl, uuid: passwordUuid })).clippedViewport;
+    await page.evaluate(bounds => {
+      const blocker = document.createElement('div');
+      blocker.id = 'edit-blocker';
+      Object.assign(blocker.style, { position: 'fixed', left: `${bounds.x}px`, top: `${bounds.y}px`, width: `${bounds.width}px`, height: `${bounds.height}px`, zIndex: '99999' });
+      document.body.appendChild(blocker);
+    }, passwordBounds);
+    const blockedType = await call(client, 'cocos_type_text', { pageUrl, uuid: passwordUuid, text: 'must-not-type' });
+    assert.deepEqual(blockedType, { typed: false, reason: 'NOT_FOCUSED' });
+    assert.equal((await call(client, 'cocos_get_properties', { pageUrl, uuid: editUuid, componentType: 'EditBox', maxDepth: 0 })).properties.string, 'bye');
+    await page.evaluate(() => {
+      document.getElementById('edit-blocker')?.remove();
+    });
     const secret = await call(client, 'cocos_type_text', { pageUrl, uuid: passwordUuid, text: 'hunter2' });
     assert.deepEqual(secret.after, { redacted: true }, JSON.stringify(secret));
     assert.equal(JSON.stringify(await call(client, 'cocos_get_properties', { pageUrl, uuid: passwordUuid, componentType: 'EditBox', maxDepth: 0 })).includes('hunter2'), false);
+    const concurrent = await Promise.all([
+      call(client, 'cocos_type_text', { pageUrl, uuid: editUuid, text: 'first' }),
+      call(client, 'cocos_type_text', { pageUrl, uuid: passwordUuid, text: 'second' }),
+    ]);
+    assert.ok(concurrent.every(result => result.typed === true), JSON.stringify(concurrent));
+    assert.deepEqual(concurrent[0].after, { string: 'first' });
+    assert.equal(await page.evaluate(() => (globalThis as any).cc.director.getScene().getChildByPath('Canvas/TestPassword').getComponent('cc.EditBox').string), 'second');
     assert.equal((await client.callTool({ name: 'cocos_type_text', arguments: { pageUrl, uuid: panelUuid, text: 'x' } })).isError, true, 'type_text needs an EditBox');
     await page.evaluate(() => {
       // Capture phase: the engine stops propagation on the canvas.

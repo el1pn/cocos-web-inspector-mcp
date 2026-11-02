@@ -4,11 +4,12 @@ import { crc32, inflateSync } from 'node:zlib';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { sanitizeUrl, validateLocalUrl, BrowserConnection } from '../src/browser.js';
-import { captureNode, clickNode, dragNode, fitsImage, fitsResponse, inspectCocos, runBridge } from '../src/bridge.js';
+import { captureNode, clickNode, dragNode, fitsImage, fitsResponse, inspectCocos, pressKey, runBridge, typeText } from '../src/bridge.js';
 import { redactBody, redactHeaders, redactText, redactUrl } from '../src/browser-data.js';
 import { cropPng, inspectorPort, NativeConnection, nativeNetworkRequest, nativeNetworkRequests, parseCocosLogcat } from '../src/native.js';
 import { createServer } from '../src/server.js';
 import { ChromeLauncher } from '../src/chrome.js';
+import './emulation-test.js';
 
 function fakeBrowser(pageUrl = 'http://localhost:3000') {
   let connected = true;
@@ -446,6 +447,60 @@ test('pointer tools serialize bounds and complete gestures per page, not across 
   assert.equal(other.clicked, true);
   await Promise.all([dragging, clicking]);
   assert.deepEqual(events, ['bounds:drag', 'move:50,50', 'down', 'move:60,50', 'move:70,50', 'up', 'bounds:click', 'move:50,50', 'down', 'up']);
+});
+
+test('type text serializes focus and keyboard input with click and key tools', async () => {
+  const events: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const page: any = pointerPage(events);
+  page.evaluate = async (_fn: unknown, request?: { action: string; uuid: string }) => {
+    if (!request) return false;
+    events.push(`${request.action}:${request.uuid}`);
+    if (request.action === 'getComponents') return { components: [{ type: 'EditBox' }] };
+    if (request.action === 'nodeInputPoint') return { x: 50, y: 50 };
+    if (request.action === 'selectEditBox') return true;
+    if (request.action === 'getProperties') return { properties: { string: 'text' } };
+  };
+  page.keyboard = {
+    insertText: async () => { events.push('type:start'); await gate; events.push('type:end'); },
+    press: async () => { events.push('key'); },
+  };
+  const typing = typeText(page, 'edit', 'text', false);
+  while (!events.includes('type:start')) await new Promise(resolve => setImmediate(resolve));
+  const clicking = clickNode(page, 'other');
+  const key = pressKey(page, 'Enter');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(!events.includes('nodeInputPoint:other'));
+  assert.ok(!events.includes('key'));
+  release();
+  await Promise.all([typing, clicking, key]);
+  assert.ok(events.indexOf('type:end') < events.indexOf('nodeInputPoint:other'));
+  assert.ok(events.indexOf('type:end') < events.indexOf('key'));
+});
+
+test('type text refuses an unrelated focused input', async () => {
+  const events: string[] = [];
+  const page: any = pointerPage(events);
+  page.evaluate = async (_fn: unknown, request?: { action: string }) => request?.action === 'getComponents' ? { components: [{ type: 'EditBox' }] }
+    : request?.action === 'nodeInputPoint' ? { x: 50, y: 50 } : false;
+  page.keyboard = { insertText: async () => { throw new Error('wrong input was changed'); } };
+  // Keep the negative focus check fast without waiting for real time.
+  const now = Date.now;
+  let clock = 0;
+  Date.now = () => clock += 2_001;
+  try { assert.deepEqual(await typeText(page, 'edit', 'text', false), { typed: false, reason: 'NOT_FOCUSED' }); }
+  finally { Date.now = now; }
+});
+
+test('press key times out on a blocked page', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const page: any = pointerPage([]);
+  page.evaluate = () => new Promise(() => {});
+  const rejected = assert.rejects(pressKey(page, 'Enter'), /Key focus timed out/);
+  await flushMicrotasks();
+  t.mock.timers.tick(5_000);
+  await rejected;
 });
 
 test('drag releases input on move failure, preserves the error, and unblocks the next click', async () => {

@@ -7,6 +7,7 @@ export type BridgeRequest =
   | { action: 'getNode'; uuid: string }
   | { action: 'getNodeBounds'; uuid: string }
   | { action: 'nodeInputPoint'; uuid: string }
+  | { action: 'selectEditBox'; uuid: string }
   | { action: 'snapshotSubtree'; uuid: string; maxDepth?: number | undefined; maxNodes?: number | undefined }
   | { action: 'semanticSnapshot'; uuid?: string | undefined; maxDepth?: number | undefined; maxNodes?: number | undefined }
   | { action: 'getComponents'; uuid: string }
@@ -124,7 +125,7 @@ export async function nodeCenter(page: Page, uuid: string): Promise<{ x: number;
 const INPUT_TIMEOUT_MS = 5_000;
 const withTimeout = <T>(work: Promise<T>, what: string): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} timed out; the page did not acknowledge pointer input`)), INPUT_TIMEOUT_MS); });
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} timed out; the page did not acknowledge the operation`)), INPUT_TIMEOUT_MS); });
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 };
 
@@ -151,7 +152,7 @@ async function pointer(page: Page) {
   return { down: (x: number, y: number) => touch('touchStart', x, y), move: (x: number, y: number) => touch('touchMove', x, y), up: () => touch('touchEnd').finally(() => owned ? withTimeout(session.detach(), 'Pointer detach').catch(() => {}) : undefined) };
 }
 
-// A page has one pointer: keep bounds lookup and the whole gesture together, even across tools.
+// A page shares focus, pointer, and emulation state: serialize operations across input tools and device changes.
 const pointerQueues = new WeakMap<Page, Promise<void>>();
 function queuePointer<T>(page: Page, work: () => Promise<T>): Promise<T> {
   const result = (pointerQueues.get(page) ?? Promise.resolve()).then(work);
@@ -174,13 +175,15 @@ async function pointerGesture(page: Page, point: { x: number; y: number }, move?
   await input.up();
 }
 
+async function clickNodeUnlocked(page: Page, uuid: string): Promise<{ clicked: false; reason: string } | { clicked: true; target: { nodeUuid: string }; point: { x: number; y: number }; runtimeOnly: true }> {
+  const point = await nodeCenter(page, uuid);
+  if ('reason' in point) return { clicked: false, reason: point.reason };
+  await pointerGesture(page, point);
+  return { clicked: true, target: { nodeUuid: uuid }, point, runtimeOnly: true };
+}
+
 export async function clickNode(page: Page, uuid: string): Promise<unknown> {
-  return queuePointer(page, async () => {
-    const point = await nodeCenter(page, uuid);
-    if ('reason' in point) return { clicked: false, reason: point.reason };
-    await pointerGesture(page, point);
-    return { clicked: true, target: { nodeUuid: uuid }, point, runtimeOnly: true };
-  });
+  return queuePointer(page, () => clickNodeUnlocked(page, uuid));
 }
 
 // Real pointer input, so ScrollView, PageView, Slider, and custom touch handlers see a drag.
@@ -201,23 +204,31 @@ export async function dragNode(page: Page, uuid: string, dx: number, dy: number,
 
 // EditBox.string is an accessor and assigning it skips text-changed/editing events, so type into the DOM input the EditBox opens on tap.
 export async function typeText(page: Page, uuid: string, text: string, submit: boolean): Promise<unknown> {
-  const { components } = await runBridge(page, { action: 'getComponents', uuid }) as { components?: Array<{ type: string }> };
-  if (!components?.some(component => component.type === 'EditBox')) throw new Error('Component not found');
-  const clicked = await clickNode(page, uuid) as { clicked: boolean; reason?: string };
-  if (!clicked.clicked) return { typed: false, reason: clicked.reason };
-  const focused = await page.waitForFunction(() => {
-    const element = document.activeElement;
-    return element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
-  }, undefined, { timeout: 2_000 }).then(() => true, () => false);
-  if (!focused) return { typed: false, reason: 'NOT_FOCUSED' };
-  await page.evaluate(() => (document.activeElement as HTMLInputElement).select());
-  if (text) await page.keyboard.insertText(text);
-  else await page.keyboard.press('Delete');
-  if (submit) await page.keyboard.press('Enter');
-  const { properties } = await runBridge(page, { action: 'getProperties', uuid, componentType: 'EditBox', maxDepth: 0 }) as { properties?: { string?: string } };
-  // get_properties drops the text of password boxes.
-  const after = typeof properties?.string === 'string' ? { string: properties.string } : { redacted: true };
-  return { typed: true, target: { nodeUuid: uuid }, length: text.length, submitted: submit, after, runtimeOnly: true };
+  return queuePointer(page, async () => {
+    const { components } = await runBridge(page, { action: 'getComponents', uuid }, INPUT_TIMEOUT_MS) as { components?: Array<{ type: string }> };
+    if (!components?.some(component => component.type === 'EditBox')) throw new Error('Component not found');
+    // Close any previously open EditBox before tapping: its DOM input can overlap the target.
+    await withTimeout(page.evaluate(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) active.blur();
+    }), 'EditBox blur');
+    const clicked = await clickNodeUnlocked(page, uuid);
+    if (!clicked.clicked) return { typed: false, reason: clicked.reason };
+    const deadline = Date.now() + 2_000;
+    let focused = false;
+    do {
+      focused = await runBridge(page, { action: 'selectEditBox', uuid }, INPUT_TIMEOUT_MS) === true;
+      if (!focused && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    } while (!focused && Date.now() < deadline);
+    if (!focused) return { typed: false, reason: 'NOT_FOCUSED' };
+    if (text) await withTimeout(page.keyboard.insertText(text), 'Text input');
+    else await withTimeout(page.keyboard.press('Delete'), 'Delete input');
+    if (submit) await withTimeout(page.keyboard.press('Enter'), 'Submit input');
+    const { properties } = await runBridge(page, { action: 'getProperties', uuid, componentType: 'EditBox', maxDepth: 0 }, INPUT_TIMEOUT_MS) as { properties?: { string?: string } };
+    // get_properties drops the text of password boxes.
+    const after = typeof properties?.string === 'string' ? { string: properties.string } : { redacted: true };
+    return { typed: true, target: { nodeUuid: uuid }, length: text.length, submitted: submit, after, runtimeOnly: true };
+  });
 }
 
 // Keys the press tools accept: Playwright names, which native maps to Android key codes.
@@ -227,17 +238,19 @@ export const keyPattern = new RegExp(`^(?:${namedKeys.join('|')}|[a-zA-Z0-9])$`)
 // Real keydown/keyup for game keyboard handlers (cc.Input KEY_DOWN/KEY_UP); cocos_type_text is the path for EditBox text.
 // The engine listens for keys on the GameCanvas element, so focus it first unless a DOM input (an open EditBox) already has focus.
 export async function pressKey(page: Page, key: string): Promise<unknown> {
-  await page.evaluate(() => {
-    const active = document.activeElement;
-    if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
-    const canvas = document.getElementById('GameCanvas');
-    if (canvas) {
-      if (!canvas.hasAttribute('tabindex')) canvas.tabIndex = -1;
-      canvas.focus();
-    }
+  return queuePointer(page, async () => {
+    await withTimeout(page.evaluate(() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
+      const canvas = document.getElementById('GameCanvas');
+      if (canvas) {
+        if (!canvas.hasAttribute('tabindex')) canvas.tabIndex = -1;
+        canvas.focus();
+      }
+    }), 'Key focus');
+    await withTimeout(page.keyboard.press(key === 'Space' ? ' ' : key), 'Key press');
+    return { pressed: true, key, runtimeOnly: true };
   });
-  await page.keyboard.press(key === 'Space' ? ' ' : key);
-  return { pressed: true, key, runtimeOnly: true };
 }
 
 const IOS_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
@@ -291,15 +304,22 @@ type EmulationState = {
 // Chrome drops every override when the owning CDP session detaches, so the session lives as long as the emulation.
 const emulations = new WeakMap<Page, { session: CDPSession; state: EmulationState }>();
 
-export async function emulateDevice(page: Page, request: EmulationRequest): Promise<unknown> {
+export function emulateDevice(page: Page, request: EmulationRequest): Promise<unknown> {
+  return queuePointer(page, () => emulateDeviceSerial(page, request));
+}
+
+async function emulateDeviceSerial(page: Page, request: EmulationRequest): Promise<unknown> {
   const current = emulations.get(page);
   const before = current?.state ?? {};
   let after: EmulationState = {};
   if (request.reset) {
-    emulations.delete(page);
     if (current) {
-      await applyEmulation(current.session, {});
-      await current.session.detach().catch(() => {});
+      try {
+        await applyEmulation(current.session, {});
+      } finally {
+        emulations.delete(page);
+        await current.session.detach().catch(() => {});
+      }
     }
   } else {
     after = { ...before };
@@ -319,8 +339,22 @@ export async function emulateDevice(page: Page, request: EmulationRequest): Prom
     if (request.downloadKbps !== undefined) after.downloadKbps = request.downloadKbps;
     if (request.uploadKbps !== undefined) after.uploadKbps = request.uploadKbps;
     const session = current?.session ?? await page.context().newCDPSession(page);
-    emulations.set(page, { session, state: after });
-    await applyEmulation(session, after);
+    try {
+      await applyEmulation(session, after);
+      emulations.set(page, { session, state: after });
+    } catch (error) {
+      if (current) {
+        try {
+          await applyEmulation(session, before);
+        } catch {
+          emulations.delete(page);
+          await session.detach().catch(() => {});
+        }
+      } else {
+        await session.detach().catch(() => {});
+      }
+      throw error;
+    }
   }
   if (request.reload) await page.reload();
   // Cocos resizes its canvas a frame or more after the viewport changes; wait so the next bounds, click, or capture sees the new layout.
@@ -330,7 +364,16 @@ export async function emulateDevice(page: Page, request: EmulationRequest): Prom
     const rect = canvas.getBoundingClientRect();
     return Math.round(rect.width) <= innerWidth && Math.round(rect.height) <= innerHeight && (Math.round(rect.width) === innerWidth || Math.round(rect.height) === innerHeight);
   }, undefined, { timeout: 3_000 }).catch(() => undefined);
-  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))).catch(() => undefined);
+  // A background or stalled page may never deliver animation frames.
+  let frameTimeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))).catch(() => undefined),
+      new Promise<void>(resolve => { frameTimeout = setTimeout(resolve, 3_000); }),
+    ]);
+  } finally {
+    clearTimeout(frameTimeout);
+  }
   const report = (state: EmulationState) => {
     if (!state.device) return state;
     const { userAgent: _userAgent, platform: _platform, ...device } = state.device;
@@ -418,7 +461,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
   if (!cc || !/^[23]\./.test(version)) throw new Error('Cocos Creator 2.x/3.x runtime not found');
   const is2 = version.startsWith('2.');
   // ponytail: 2.x supports the read-only core only; add an action here once its 2.x mapping is verified against a 2.x fixture.
-  if (is2 && !['runtimeInfo', 'runtimeDiagnostics', 'sceneTree', 'findNode', 'getNode', 'getNodeBounds', 'nodeInputPoint', 'getComponents', 'getProperties', 'highlightNode', 'pause', 'resume', 'stepFrame', 'showStats', 'setNodeActive', 'setTransform', 'snapshotSubtree', 'timeScale', 'setProperty', 'callMethod', 'pickAt', 'selection', 'semanticSnapshot', 'explainClick', 'listenerReport', 'eventTrace', 'frameProfile', 'animationReport', 'dynamicAtlas', 'assetReport', 'explainVisibility', 'explainLayout'].includes(request.action)) throw new Error(`Unsupported on Cocos 2.x: ${request.action}`);
+  if (is2 && !['runtimeInfo', 'runtimeDiagnostics', 'sceneTree', 'findNode', 'getNode', 'getNodeBounds', 'nodeInputPoint', 'selectEditBox', 'getComponents', 'getProperties', 'highlightNode', 'pause', 'resume', 'stepFrame', 'showStats', 'setNodeActive', 'setTransform', 'snapshotSubtree', 'timeScale', 'setProperty', 'callMethod', 'pickAt', 'selection', 'semanticSnapshot', 'explainClick', 'listenerReport', 'eventTrace', 'frameProfile', 'animationReport', 'dynamicAtlas', 'assetReport', 'explainVisibility', 'explainLayout'].includes(request.action)) throw new Error(`Unsupported on Cocos 2.x: ${request.action}`);
   const scene = cc.director?.getScene?.();
   if (!scene) throw new Error(`Active Cocos scene not found (${cc.director ? 'director has no scene yet' : 'no director'}); the game may still be booting or loading a scene, retry shortly`);
 
@@ -589,6 +632,17 @@ export function inspectCocos(request: BridgeRequest): unknown {
         : typeof transform?.hitTest === 'function' && !!transform.hitTest(screen, windowId);
     } catch { return false; }
   };
+
+  if (request.action === 'selectEditBox') {
+    const node = findByUuid(request.uuid);
+    const edit = components(node).find(component => componentName(component) === 'EditBox');
+    if (!edit) throw new Error('Component not found');
+    // ponytail: Cocos 3.x web EditBox owns _impl._edTxt; reject unknown backends instead of typing into another input.
+    const element = edit._impl?._edTxt;
+    if (!element || element !== root.document?.activeElement || typeof element.select !== 'function') return false;
+    element.select();
+    return true;
+  }
 
   if (request.action === 'nodeInputPoint') {
     const node = findByUuid(request.uuid);
