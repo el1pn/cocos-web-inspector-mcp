@@ -17,7 +17,8 @@ export type InspectorErrorCode =
   | 'MUTATION_DISABLED'
   | 'INVALID_MUTATION'
   | 'OUTPUT_TRUNCATED'
-  | 'REQUEST_NOT_FOUND';
+  | 'REQUEST_NOT_FOUND'
+  | 'EVALUATE_TIMEOUT';
 
 export class InspectorError extends Error {
   constructor(readonly code: InspectorErrorCode, message: string) {

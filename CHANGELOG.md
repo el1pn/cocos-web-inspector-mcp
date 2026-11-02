@@ -2,6 +2,12 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+### Changed
+
+- A web tool call that the page never answers now fails after 45 s with `EVALUATE_TIMEOUT` instead of hanging. The error says whether the page main thread is blocked (debugger pause, busy loop) or responsive (hidden or throttled tab), and the server logs the same line to stderr.
+
 ## 2.6.0
 
 ### Added

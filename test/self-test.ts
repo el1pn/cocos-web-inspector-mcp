@@ -493,6 +493,11 @@ test('browser connection retries IPv6 loopback and hints at port collisions', as
   await failing.close();
 });
 
+test('runBridge rejects with EVALUATE_TIMEOUT when the page never answers', async () => {
+  const page = { url: () => 'http://127.0.0.1/', evaluate: () => new Promise(() => {}) } as any;
+  await assert.rejects(() => runBridge(page, { action: 'sceneTree' }, 20), (error: any) => error.code === 'EVALUATE_TIMEOUT' && /sceneTree/.test(error.message) && /blocked/.test(error.message));
+});
+
 test('runBridge bounds oversized encoded responses', async () => {
   const page = { evaluate: async () => ({ payload: '\\'.repeat(100_000) }) } as any;
   assert.deepEqual(await runBridge(page, { action: 'sceneTree' }), {

@@ -1,4 +1,5 @@
 import type { CDPSession, Page } from 'playwright-core';
+import { InspectorError } from './browser.js';
 
 export type BridgeRequest =
   | { action: 'sceneTree'; maxDepth?: number | undefined; maxNodes?: number | undefined }
@@ -48,8 +49,29 @@ export function fitsResponse(result: unknown): boolean {
   return Buffer.byteLength(encoded, 'utf8') <= MAX_BYTES - 4_096;
 }
 
-export async function runBridge(page: Page, request: BridgeRequest): Promise<unknown> {
-  const result = await page.evaluate(inspectCocos, request);
+// Longest legitimate call is frameProfile at 30 s; a frozen page (paused debugger, hung main thread) never answers page.evaluate.
+const BRIDGE_TIMEOUT_MS = 45_000;
+
+// Tells a blocked main thread (debugger pause, busy loop) from a live page whose answer is merely late (hidden tab).
+async function probePage(page: Page, timeoutMs: number): Promise<string> {
+  const none = new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), timeoutMs));
+  const state = await Promise.race([page.evaluate(() => `visibility=${document.visibilityState}, readyState=${document.readyState}`).catch(() => undefined), none]);
+  return state ? `page main thread is responsive (${state}); the call itself is slow or throttled` : 'page main thread did not answer a trivial probe: it is blocked (paused in a debugger or stuck in a busy loop)';
+}
+
+export async function runBridge(page: Page, request: BridgeRequest, timeoutMs = BRIDGE_TIMEOUT_MS): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const started = Date.now();
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      probePage(page, Math.min(2_000, timeoutMs)).then(diagnosis => {
+        const message = `Page did not answer ${request.action} within ${timeoutMs} ms: ${diagnosis}`;
+        process.stderr.write(`[cocos-web-inspector] EVALUATE_TIMEOUT action=${request.action} elapsed=${Date.now() - started}ms url=${page.url()} ${diagnosis}\n`);
+        reject(new InspectorError('EVALUATE_TIMEOUT', message));
+      });
+    }, timeoutMs);
+  });
+  const result = await Promise.race([page.evaluate(inspectCocos, request), timeout]).finally(() => clearTimeout(timer));
   return fitsResponse(result) ? result : { truncated: true, truncationReasons: ['RESPONSE_LIMIT'] };
 }
 
