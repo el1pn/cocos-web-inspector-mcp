@@ -120,23 +120,37 @@ export async function nodeCenter(page: Page, uuid: string): Promise<{ x: number;
 }
 
 // Under touch emulation Chrome turns mouse input into touch and never acknowledges Playwright's mouse calls, so send touch directly.
-function pointer(page: Page) {
+// Touch emulation can be owned by another process (the CLI `launch` command), so ask the page, not only our own emulation map.
+const INPUT_TIMEOUT_MS = 5_000;
+const withTimeout = <T>(work: Promise<T>, what: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} timed out; the page did not acknowledge pointer input`)), INPUT_TIMEOUT_MS); });
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+};
+
+async function pointer(page: Page) {
   const emulation = emulations.get(page);
-  if (!emulation?.state.device?.mobile) return { down: async (x: number, y: number) => { await page.mouse.move(x, y); await page.mouse.down(); }, move: (x: number, y: number) => page.mouse.move(x, y), up: () => page.mouse.up() };
+  const touching = emulation?.state.device?.mobile || await page.evaluate(() => navigator.maxTouchPoints > 0);
+  if (!touching) return { down: async (x: number, y: number) => { await page.mouse.move(x, y); await page.mouse.down(); }, move: (x: number, y: number) => page.mouse.move(x, y), up: () => page.mouse.up() };
+  const owned = !emulation?.session;
+  const session = emulation?.session ?? await page.context().newCDPSession(page);
   let last = { x: 0, y: 0 };
   const touch = async (type: 'touchStart' | 'touchMove' | 'touchEnd', x = last.x, y = last.y) => {
     last = { x, y };
-    await emulation.session.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] });
+    await withTimeout(session.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] }), type);
   };
-  return { down: (x: number, y: number) => touch('touchStart', x, y), move: (x: number, y: number) => touch('touchMove', x, y), up: () => touch('touchEnd') };
+  return { down: (x: number, y: number) => touch('touchStart', x, y), move: (x: number, y: number) => touch('touchMove', x, y), up: () => touch('touchEnd').finally(() => owned ? session.detach().catch(() => {}) : undefined) };
 }
 
 export async function clickNode(page: Page, uuid: string): Promise<unknown> {
   const point = await nodeCenter(page, uuid);
   if ('reason' in point) return { clicked: false, reason: point.reason };
-  const input = pointer(page);
-  await input.down(point.x, point.y);
-  await input.up();
+  const input = await pointer(page);
+  try {
+    await input.down(point.x, point.y);
+  } finally {
+    await input.up();
+  }
   return { clicked: true, target: { nodeUuid: uuid }, point, runtimeOnly: true };
 }
 
@@ -145,13 +159,16 @@ export async function dragNode(page: Page, uuid: string, dx: number, dy: number,
   const from = await nodeCenter(page, uuid);
   if ('reason' in from) return { dragged: false, reason: from.reason };
   const to = { x: from.x + dx, y: from.y + dy };
-  const input = pointer(page);
-  await input.down(from.x, from.y);
-  for (let step = 1; step <= steps; step++) {
-    await new Promise(resolve => setTimeout(resolve, durationMs / steps));
-    await input.move(from.x + dx * step / steps, from.y + dy * step / steps);
+  const input = await pointer(page);
+  try {
+    await input.down(from.x, from.y);
+    for (let step = 1; step <= steps; step++) {
+      await new Promise(resolve => setTimeout(resolve, durationMs / steps));
+      await input.move(from.x + dx * step / steps, from.y + dy * step / steps);
+    }
+  } finally {
+    await input.up();
   }
-  await input.up();
   return { dragged: true, target: { nodeUuid: uuid }, from, to, runtimeOnly: true };
 }
 
