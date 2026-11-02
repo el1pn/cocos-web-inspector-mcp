@@ -834,6 +834,61 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.deepEqual((await client.callTool({ name: 'cocos_network_request', arguments: { pageUrl, id: 999_999 } })).structuredContent, { code: 'REQUEST_NOT_FOUND', message: 'Request 999999 not found; list requests again, older entries are dropped' });
     await page.evaluate(() => localStorage.clear());
 
+    // Cocos chooses its input backend at startup, so reload after enabling each touch override.
+    for (const owner of ['tool', 'external'] as const) {
+      const external = owner === 'external' ? await launched.context.newCDPSession(page) : undefined;
+      try {
+        if (external) await external.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+        else await call(client, 'cocos_emulate_device', { pageUrl, preset: 'iphone-14', orientation: 'landscape' });
+        await page.reload();
+        await waitForFixture(page);
+        assert.ok(await page.evaluate(() => navigator.maxTouchPoints > 0), `${owner} touch emulation must be active at startup`);
+        const touchScrollUuid = await page.evaluate(async () => {
+          const { cc } = globalThis as any;
+          const canvas = cc.director.getScene().getChildByName('Canvas');
+          const view = new cc.Node('TouchScroll');
+          view.layer = canvas.layer;
+          view.addComponent('cc.UITransform').setContentSize(240, 300);
+          view.addComponent('cc.Mask');
+          const content = new cc.Node('Content');
+          content.layer = canvas.layer;
+          content.addComponent('cc.UITransform').setContentSize(240, 1_200);
+          content.getComponent('cc.UITransform').setAnchorPoint(0.5, 1);
+          content.setPosition(0, 150, 0);
+          view.addChild(content);
+          canvas.addChild(view);
+          const scroll = view.addComponent('cc.ScrollView');
+          scroll.content = content;
+          scroll.horizontal = false;
+          scroll.inertia = false;
+          scroll.elastic = false;
+          await new Promise<void>(resolve => cc.director.once(cc.Director.EVENT_AFTER_DRAW, resolve));
+          return { view: view.uuid, content: content.uuid };
+        });
+        const touchScrollY = () => page.evaluate(() => (globalThis as any).cc.director.getScene().getChildByPath('Canvas/TouchScroll').getComponent('cc.ScrollView').getScrollOffset().y);
+        const before = await touchScrollY();
+        assert.equal((await call(client, 'cocos_drag_node', { pageUrl, uuid: touchScrollUuid.view, dx: 0, dy: -100 })).dragged, true);
+        const after = await touchScrollY();
+        assert.ok(after > before + 20, `${owner} touch drag must scroll: ${before} -> ${after}`);
+        const maskedDrag = await call(client, 'cocos_drag_node', { pageUrl, uuid: touchScrollUuid.content, dx: 0, dy: -60 });
+        assert.equal(maskedDrag.dragged, true);
+        const viewBounds = (await call(client, 'cocos_get_node_bounds', { pageUrl, uuid: touchScrollUuid.view })).clippedViewport;
+        assert.ok(maskedDrag.from.x >= viewBounds.x && maskedDrag.from.x <= viewBounds.x + viewBounds.width);
+        assert.ok(maskedDrag.from.y >= viewBounds.y && maskedDrag.from.y <= viewBounds.y + viewBounds.height);
+        assert.ok(await touchScrollY() > after + 20, `${owner} drag on masked content must reach the ScrollView`);
+      } finally {
+        if (external) {
+          try {
+            await external.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+          } finally {
+            await external.detach();
+          }
+        } else {
+          await call(client, 'cocos_emulate_device', { pageUrl, reset: true });
+        }
+      }
+    }
+
     const secondPage = await launched.context.newPage();
     await secondPage.goto(`${pageUrl}?second=1`);
     await waitForFixture(secondPage);

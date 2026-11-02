@@ -6,6 +6,7 @@ export type BridgeRequest =
   | { action: 'findNode'; uuid?: string | undefined; name?: string | undefined; path?: string | undefined; nameContains?: string | undefined; componentType?: string | undefined; active?: boolean | undefined; pathPrefix?: string | undefined; limit?: number | undefined }
   | { action: 'getNode'; uuid: string }
   | { action: 'getNodeBounds'; uuid: string }
+  | { action: 'nodeInputPoint'; uuid: string }
   | { action: 'snapshotSubtree'; uuid: string; maxDepth?: number | undefined; maxNodes?: number | undefined }
   | { action: 'semanticSnapshot'; uuid?: string | undefined; maxDepth?: number | undefined; maxNodes?: number | undefined }
   | { action: 'getComponents'; uuid: string }
@@ -79,7 +80,7 @@ export type Clip = { x: number; y: number; width: number; height: number };
 
 /** The node's visible viewport rectangle, or why it has none. */
 export async function visibleClip(page: Page, uuid: string): Promise<Clip | { reason: string }> {
-  const result = await page.evaluate(inspectCocos, { action: 'getNodeBounds', uuid } satisfies BridgeRequest) as any;
+  const result = await runBridge(page, { action: 'getNodeBounds', uuid }) as any;
   if (!result.available || !result.visible) return { reason: result.reason ?? 'OUTSIDE_VIEWPORT' };
   const clip = result.clippedViewport;
   if (!clip || ![clip.x, clip.y, clip.width, clip.height].every(Number.isFinite) || clip.width <= 0 || clip.height <= 0) return { reason: 'INVALID_GEOMETRY' };
@@ -115,8 +116,7 @@ export async function captureNode(page: Page, uuid: string, maxBytes?: number): 
 }
 
 export async function nodeCenter(page: Page, uuid: string): Promise<{ x: number; y: number } | { reason: string }> {
-  const clip = await visibleClip(page, uuid);
-  return 'reason' in clip ? clip : { x: clip.x + clip.width / 2, y: clip.y + clip.height / 2 };
+  return await runBridge(page, { action: 'nodeInputPoint', uuid }, INPUT_TIMEOUT_MS) as { x: number; y: number } | { reason: string };
 }
 
 // Under touch emulation Chrome turns mouse input into touch and never acknowledges Playwright's mouse calls, so send touch directly.
@@ -130,46 +130,73 @@ const withTimeout = <T>(work: Promise<T>, what: string): Promise<T> => {
 
 async function pointer(page: Page) {
   const emulation = emulations.get(page);
-  const touching = emulation?.state.device?.mobile || await page.evaluate(() => navigator.maxTouchPoints > 0);
-  if (!touching) return { down: async (x: number, y: number) => { await page.mouse.move(x, y); await page.mouse.down(); }, move: (x: number, y: number) => page.mouse.move(x, y), up: () => page.mouse.up() };
+  const touching = emulation?.state.device?.mobile || await withTimeout(page.evaluate(() => navigator.maxTouchPoints > 0), 'Touch detection');
+  if (!touching) return {
+    down: async (x: number, y: number) => { await withTimeout(page.mouse.move(x, y), 'Mouse move'); await withTimeout(page.mouse.down(), 'Mouse down'); },
+    move: (x: number, y: number) => withTimeout(page.mouse.move(x, y), 'Mouse move'),
+    up: () => withTimeout(page.mouse.up(), 'Mouse up'),
+  };
   const owned = !emulation?.session;
-  const session = emulation?.session ?? await page.context().newCDPSession(page);
+  let abandoned = false;
+  const connecting = emulation?.session ? Promise.resolve(emulation.session) : page.context().newCDPSession(page).then(session => {
+    if (abandoned) void session.detach().catch(() => {});
+    return session;
+  });
+  const session = await withTimeout(connecting, 'Pointer session').catch(error => { abandoned = true; throw error; });
   let last = { x: 0, y: 0 };
   const touch = async (type: 'touchStart' | 'touchMove' | 'touchEnd', x = last.x, y = last.y) => {
     last = { x, y };
     await withTimeout(session.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] }), type);
   };
-  return { down: (x: number, y: number) => touch('touchStart', x, y), move: (x: number, y: number) => touch('touchMove', x, y), up: () => touch('touchEnd').finally(() => owned ? session.detach().catch(() => {}) : undefined) };
+  return { down: (x: number, y: number) => touch('touchStart', x, y), move: (x: number, y: number) => touch('touchMove', x, y), up: () => touch('touchEnd').finally(() => owned ? withTimeout(session.detach(), 'Pointer detach').catch(() => {}) : undefined) };
 }
 
-export async function clickNode(page: Page, uuid: string): Promise<unknown> {
-  const point = await nodeCenter(page, uuid);
-  if ('reason' in point) return { clicked: false, reason: point.reason };
+// A page has one pointer: keep bounds lookup and the whole gesture together, even across tools.
+const pointerQueues = new WeakMap<Page, Promise<void>>();
+function queuePointer<T>(page: Page, work: () => Promise<T>): Promise<T> {
+  const result = (pointerQueues.get(page) ?? Promise.resolve()).then(work);
+  const settled = result.then(() => {}, () => {});
+  pointerQueues.set(page, settled);
+  void settled.then(() => { if (pointerQueues.get(page) === settled) pointerQueues.delete(page); });
+  return result;
+}
+
+async function pointerGesture(page: Page, point: { x: number; y: number }, move?: (input: Awaited<ReturnType<typeof pointer>>) => Promise<void>) {
   const input = await pointer(page);
   try {
     await input.down(point.x, point.y);
-  } finally {
-    await input.up();
+    await move?.(input);
+  } catch (error) {
+    // Cleanup must not hide the original failure or continue the move loop after a timeout.
+    await input.up().catch(() => {});
+    throw error;
   }
-  return { clicked: true, target: { nodeUuid: uuid }, point, runtimeOnly: true };
+  await input.up();
+}
+
+export async function clickNode(page: Page, uuid: string): Promise<unknown> {
+  return queuePointer(page, async () => {
+    const point = await nodeCenter(page, uuid);
+    if ('reason' in point) return { clicked: false, reason: point.reason };
+    await pointerGesture(page, point);
+    return { clicked: true, target: { nodeUuid: uuid }, point, runtimeOnly: true };
+  });
 }
 
 // Real pointer input, so ScrollView, PageView, Slider, and custom touch handlers see a drag.
 export async function dragNode(page: Page, uuid: string, dx: number, dy: number, steps = 10, durationMs = 300): Promise<unknown> {
-  const from = await nodeCenter(page, uuid);
-  if ('reason' in from) return { dragged: false, reason: from.reason };
-  const to = { x: from.x + dx, y: from.y + dy };
-  const input = await pointer(page);
-  try {
-    await input.down(from.x, from.y);
-    for (let step = 1; step <= steps; step++) {
-      await new Promise(resolve => setTimeout(resolve, durationMs / steps));
-      await input.move(from.x + dx * step / steps, from.y + dy * step / steps);
-    }
-  } finally {
-    await input.up();
-  }
-  return { dragged: true, target: { nodeUuid: uuid }, from, to, runtimeOnly: true };
+  return queuePointer(page, async () => {
+    const from = await nodeCenter(page, uuid);
+    if ('reason' in from) return { dragged: false, reason: from.reason };
+    const to = { x: from.x + dx, y: from.y + dy };
+    await pointerGesture(page, from, async input => {
+      for (let step = 1; step <= steps; step++) {
+        await new Promise(resolve => setTimeout(resolve, durationMs / steps));
+        await input.move(from.x + dx * step / steps, from.y + dy * step / steps);
+      }
+    });
+    return { dragged: true, target: { nodeUuid: uuid }, from, to, runtimeOnly: true };
+  });
 }
 
 // EditBox.string is an accessor and assigning it skips text-changed/editing events, so type into the DOM input the EditBox opens on tap.
@@ -391,7 +418,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
   if (!cc || !/^[23]\./.test(version)) throw new Error('Cocos Creator 2.x/3.x runtime not found');
   const is2 = version.startsWith('2.');
   // ponytail: 2.x supports the read-only core only; add an action here once its 2.x mapping is verified against a 2.x fixture.
-  if (is2 && !['runtimeInfo', 'runtimeDiagnostics', 'sceneTree', 'findNode', 'getNode', 'getNodeBounds', 'getComponents', 'getProperties', 'highlightNode', 'pause', 'resume', 'stepFrame', 'showStats', 'setNodeActive', 'setTransform', 'snapshotSubtree', 'timeScale', 'setProperty', 'callMethod', 'pickAt', 'selection', 'semanticSnapshot', 'explainClick', 'listenerReport', 'eventTrace', 'frameProfile', 'animationReport', 'dynamicAtlas', 'assetReport', 'explainVisibility', 'explainLayout'].includes(request.action)) throw new Error(`Unsupported on Cocos 2.x: ${request.action}`);
+  if (is2 && !['runtimeInfo', 'runtimeDiagnostics', 'sceneTree', 'findNode', 'getNode', 'getNodeBounds', 'nodeInputPoint', 'getComponents', 'getProperties', 'highlightNode', 'pause', 'resume', 'stepFrame', 'showStats', 'setNodeActive', 'setTransform', 'snapshotSubtree', 'timeScale', 'setProperty', 'callMethod', 'pickAt', 'selection', 'semanticSnapshot', 'explainClick', 'listenerReport', 'eventTrace', 'frameProfile', 'animationReport', 'dynamicAtlas', 'assetReport', 'explainVisibility', 'explainLayout'].includes(request.action)) throw new Error(`Unsupported on Cocos 2.x: ${request.action}`);
   const scene = cc.director?.getScene?.();
   if (!scene) throw new Error(`Active Cocos scene not found (${cc.director ? 'director has no scene yet' : 'no director'}); the game may still be booting or loading a scene, retry shortly`);
 
@@ -540,6 +567,65 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const inactive = node.activeInHierarchy === false;
     return { available: true, canvas: { x: worldX, y: worldY, width: worldWidth, height: worldHeight }, viewport, clippedViewport: clipped, anchor: { x: Number(transform.anchorPoint.x), y: Number(transform.anchorPoint.y) }, worldPosition: { x: Number(position.x), y: Number(position.y), z: Number(position.z ?? 0) }, visible: !inactive && clipped.width > 0 && clipped.height > 0, outsideViewport: clipped.width === 0 || clipped.height === 0, ...(inactive ? { reason: 'INACTIVE' } : {}) };
   };
+
+  // Match the engine's web input conversion before asking its hit test (including ancestor Mask shapes).
+  const inputScreenPoint = (point: { x: number; y: number }): any => {
+    const canvas = cc.game?.canvas ?? root.document?.querySelector('#GameCanvas');
+    if (!canvas || !cc.Vec2) return undefined;
+    const rect = canvas.getBoundingClientRect();
+    if (is2 && typeof cc.view?._convertMouseToLocationInView === 'function') {
+      const screen = new cc.Vec2(point.x, point.y);
+      cc.view._convertMouseToLocationInView(screen, { left: rect.left, top: rect.top, width: rect.width, height: rect.height });
+      return screen;
+    }
+    const dpr = Number(cc.screen?.devicePixelRatio ?? root.devicePixelRatio ?? 1);
+    return new cc.Vec2((point.x - rect.left) * dpr, (rect.top + rect.height - point.y) * dpr);
+  };
+  const inputHitTest = (node: any, screen: any, windowId: number): boolean => {
+    if (!screen) return false;
+    try {
+      const transform = components(node).find(component => componentName(component) === 'UITransform');
+      return is2 ? typeof node._hitTest === 'function' && !!node._hitTest(screen, dataProperty(node, '_touchListener'))
+        : typeof transform?.hitTest === 'function' && !!transform.hitTest(screen, windowId);
+    } catch { return false; }
+  };
+
+  if (request.action === 'nodeInputPoint') {
+    const node = findByUuid(request.uuid);
+    const bounds = nodeBounds(node);
+    if (!bounds.available || !bounds.visible) return { reason: bounds.reason ?? 'OUTSIDE_VIEWPORT' };
+    let { x, y, width, height } = bounds.clippedViewport;
+    let masked = false;
+    let ancestor = node.parent;
+    for (let depth = 0; ancestor && depth < 100; ancestor = ancestor.parent, depth++) {
+      const mask = components(ancestor).find(component => componentName(component) === 'Mask' && dataProperty(component, '_enabled') !== false);
+      if (!mask) continue;
+      masked = true;
+      // Only non-inverted masks constrain the candidate rectangle; hitTest checks the exact shape below.
+      if (dataProperty(mask, '_inverted') || dataProperty(mask, '_N$inverted')) continue;
+      const maskBounds = nodeBounds(ancestor);
+      if (!maskBounds.available) return { reason: maskBounds.reason };
+      const rect = maskBounds.clippedViewport;
+      const right = Math.min(x + width, rect.x + rect.width);
+      const bottom = Math.min(y + height, rect.y + rect.height);
+      x = Math.max(x, rect.x);
+      y = Math.max(y, rect.y);
+      width = right - x;
+      height = bottom - y;
+    }
+    if (ancestor) return { reason: 'TRAVERSAL_LIMIT' };
+    if (width <= 0 || height <= 0) return { reason: 'MASKED_OR_OUTSIDE_HIT_AREA' };
+    if (!masked) return { x: x + width / 2, y: y + height / 2 };
+    const windowId = Number(cc.director?.root?.batcher2D?.getFirstRenderCamera?.(node)?.systemWindowId ?? 0);
+    // ponytail: at most 25 probes for irregular/inverted masks; reject thin unsampled slivers rather than guess.
+    for (const fy of [0.5, 0.25, 0.75, 0.125, 0.875]) {
+      for (const fx of [0.5, 0.25, 0.75, 0.125, 0.875]) {
+        const point = { x: x + width * fx, y: y + height * fy };
+        if (inputHitTest(node, inputScreenPoint(point), windowId)) return point;
+      }
+    }
+    return { reason: 'MASKED_OR_OUTSIDE_HIT_AREA' };
+  }
 
   if (request.action === 'runtimeInfo') {
     const canvas = cc.game?.canvas ?? root.document?.querySelector('#GameCanvas');
@@ -1486,15 +1572,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
     if (!point) return { version, ...(target ? { target: { ...summary(target) } } : {}), clickable: false, reasons: reasons.length ? reasons : ['NO_POINT'] };
     const canvas = cc.game?.canvas ?? root.document?.querySelector('#GameCanvas');
     if (typeof HTMLCanvasElement === 'undefined' || !(canvas instanceof HTMLCanvasElement)) return { version, clickable: false, reasons: [...reasons, 'NO_CANVAS'] };
-    const rect = canvas.getBoundingClientRect();
-    // Same conversion as the web touch input: canvas-relative, y up, scaled by the engine's device pixel ratio.
-    const dpr = Number(cc.screen?.devicePixelRatio ?? root.devicePixelRatio ?? 1);
-    let screenPoint = cc.Vec2 ? new cc.Vec2((point.x - rect.left) * dpr, (rect.top + rect.height - point.y) * dpr) : undefined;
-    // 2.x hit tests in view space (design resolution, y up): the same conversion the input manager applies to a mouse event.
-    if (is2 && cc.Vec2 && typeof cc.view?._convertMouseToLocationInView === 'function') {
-      screenPoint = new cc.Vec2(point.x, point.y);
-      cc.view._convertMouseToLocationInView(screenPoint, { left: rect.left, top: rect.top, width: rect.width, height: rect.height });
-    }
+    const screenPoint = inputScreenPoint(point);
     // The global cc namespace does not expose the input singleton, so rebuild the dispatcher's order from the scene:
     // higher camera priority first, then reverse pre-order (later siblings and descendants before what they cover).
     const candidates: Array<{ node: any; order: number; camera: number; windowId: number }> = [];
@@ -1523,15 +1601,7 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const hits: Array<Record<string, unknown>> = [];
     let claimer: any;
     for (const { node, windowId } of sorted) {
-      const transform = components(node).find(component => componentName(component) === 'UITransform');
-      let hit = false;
-      // hitTest is the engine's own query: matrix math and Mask checks, no state change. 2.x only has the private Node._hitTest.
-      try {
-        hit = is2
-          ? !!screenPoint && typeof node._hitTest === 'function' && node._hitTest(screenPoint, dataProperty(node, '_touchListener'))
-          : !!screenPoint && typeof transform?.hitTest === 'function' && transform.hitTest(screenPoint, windowId);
-      } catch { hit = false; }
-      if (!hit) continue;
+      if (!inputHitTest(node, screenPoint, windowId)) continue;
       const types = components(node).map(componentName);
       hits.push({ uuid: String(node.uuid ?? ''), name: String(node.name ?? '').slice(0, 200), components: types.slice(0, 20), ...(types.includes('BlockInputEvents') ? { blocksInput: true } : {}) });
       if (!claimer) claimer = node;

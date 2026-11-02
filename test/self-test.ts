@@ -4,7 +4,7 @@ import { crc32, inflateSync } from 'node:zlib';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { sanitizeUrl, validateLocalUrl, BrowserConnection } from '../src/browser.js';
-import { captureNode, fitsImage, fitsResponse, inspectCocos, runBridge } from '../src/bridge.js';
+import { captureNode, clickNode, dragNode, fitsImage, fitsResponse, inspectCocos, runBridge } from '../src/bridge.js';
 import { redactBody, redactHeaders, redactText, redactUrl } from '../src/browser-data.js';
 import { cropPng, inspectorPort, NativeConnection, nativeNetworkRequest, nativeNetworkRequests, parseCocosLogcat } from '../src/native.js';
 import { createServer } from '../src/server.js';
@@ -419,6 +419,159 @@ test('capture downscales through CDP when quality steps still exceed the limit',
   assert.deepEqual(scales, [0.75, 0.5]);
   assert.deepEqual({ ...result, data: undefined }, { captured: true, mimeType: 'image/jpeg', data: undefined, width: 2_000, height: 1_000, scale: 0.5 });
 });
+
+function pointerPage(events: string[]) {
+  return {
+    url: () => 'http://127.0.0.1/',
+    evaluate: async (_fn: unknown, request?: { uuid: string }) => {
+      if (request) { events.push(`bounds:${request.uuid}`); return { x: 50, y: 50 }; }
+      return false;
+    },
+    mouse: {
+      move: async (x: number, y: number) => { events.push(`move:${x},${y}`); },
+      down: async () => { events.push('down'); },
+      up: async () => { events.push('up'); },
+    },
+  };
+}
+
+const flushMicrotasks = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+
+test('pointer tools serialize bounds and complete gestures per page, not across pages', async () => {
+  const events: string[] = [];
+  const page = pointerPage(events);
+  const dragging = dragNode(page as any, 'drag', 20, 0, 2, 20);
+  const clicking = clickNode(page as any, 'click');
+  const other = await clickNode(pointerPage([]) as any, 'other') as any;
+  assert.equal(other.clicked, true);
+  await Promise.all([dragging, clicking]);
+  assert.deepEqual(events, ['bounds:drag', 'move:50,50', 'down', 'move:60,50', 'move:70,50', 'up', 'bounds:click', 'move:50,50', 'down', 'up']);
+});
+
+test('drag releases input on move failure, preserves the error, and unblocks the next click', async () => {
+  const events: string[] = [];
+  const page = pointerPage(events);
+  const move = page.mouse.move;
+  page.mouse.move = async (x, y) => { if (x !== 50) throw new Error('move failed'); await move(x, y); };
+  const up = page.mouse.up;
+  page.mouse.up = async () => { await up(); throw new Error('cleanup failed'); };
+  await assert.rejects(dragNode(page as any, 'drag', 20, 0, 2, 0), /move failed/);
+  assert.deepEqual(events, ['bounds:drag', 'move:50,50', 'down', 'up']);
+  page.mouse.up = up;
+  assert.equal((await clickNode(page as any, 'next') as any).clicked, true);
+});
+
+test('drag bounds evaluation times out before sending input', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const events: string[] = [];
+  const page: any = pointerPage(events);
+  page.evaluate = () => new Promise(() => {});
+  const rejected = assert.rejects(dragNode(page, 'drag', 20, 0), /Page did not answer nodeInputPoint/);
+  await flushMicrotasks();
+  t.mock.timers.tick(5_000);
+  await flushMicrotasks();
+  t.mock.timers.tick(2_000);
+  await rejected;
+  assert.deepEqual(events, []);
+});
+
+test('drag bounds touch detection and pointer setup are bounded', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  for (const stage of ['detection', 'session'] as const) {
+    const events: string[] = [];
+    const page: any = pointerPage(events);
+    page.evaluate = async (_fn: unknown, request?: unknown) => request ? { x: 50, y: 50 } : stage === 'detection' ? new Promise(() => {}) : true;
+    let resolveSession: ((session: unknown) => void) | undefined;
+    page.context = () => ({ newCDPSession: () => new Promise(resolve => { resolveSession = resolve; }) });
+    const rejected = assert.rejects(dragNode(page, 'drag', 20, 0), stage === 'detection' ? /Touch detection timed out/ : /Pointer session timed out/);
+    await flushMicrotasks();
+    t.mock.timers.tick(5_000);
+    await rejected;
+    if (stage === 'session') {
+      resolveSession!({ detach: async () => { events.push('detach'); } });
+      await flushMicrotasks();
+      assert.deepEqual(events, ['detach']);
+    } else assert.deepEqual(events, []);
+  }
+});
+
+test('drag stops after a mouse timeout and bounds pointer release', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const events: string[] = [];
+  const page = pointerPage(events);
+  const move = page.mouse.move;
+  page.mouse.move = async (x, y) => { await move(x, y); if (x !== 50) await new Promise(() => {}); };
+  page.mouse.up = async () => { events.push('up'); await new Promise(() => {}); };
+  const rejected = assert.rejects(dragNode(page as any, 'drag', 20, 0, 2, 0), /Mouse move timed out/);
+  await flushMicrotasks();
+  t.mock.timers.tick(1);
+  await flushMicrotasks();
+  t.mock.timers.tick(5_000);
+  await flushMicrotasks();
+  t.mock.timers.tick(5_000);
+  await rejected;
+  t.mock.timers.tick(10_000);
+  await flushMicrotasks();
+  assert.deepEqual(events, ['bounds:drag', 'move:50,50', 'down', 'move:60,50', 'up']);
+});
+
+test('touch failure releases and detaches the session within bounded time', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const events: string[] = [];
+  const page: any = pointerPage(events);
+  page.evaluate = async (_fn: unknown, request?: unknown) => request ? { x: 50, y: 50 } : true;
+  page.context = () => ({ newCDPSession: async () => ({
+    send: async (_method: string, params: { type: string }) => { events.push(params.type); await new Promise(() => {}); },
+    detach: async () => { events.push('detach'); await new Promise(() => {}); },
+  }) });
+  const rejected = assert.rejects(dragNode(page, 'drag', 20, 0), /touchStart timed out/);
+  await flushMicrotasks();
+  for (let i = 0; i < 3; i++) { t.mock.timers.tick(5_000); await flushMicrotasks(); }
+  await rejected;
+  assert.deepEqual(events, ['touchStart', 'touchEnd', 'detach']);
+});
+
+test('node input point intersects Mask bounds and validates irregular masks with the engine hit test', () => withFakeCocos(() => {
+  const cc = (globalThis as any).cc;
+  const node = cc.director.getScene().children[0];
+  class Canvas {
+    width = 1280; height = 720;
+    getBoundingClientRect() { return { left: 0, top: 0, width: 1280, height: 720 }; }
+  }
+  class Mask { _enabled = true; _inverted = false; }
+  cc.game = { canvas: new Canvas() };
+  cc.Vec2 = class { constructor(public x: number, public y: number) {} };
+  const globals = { HTMLCanvasElement: Canvas, innerWidth: 1280, innerHeight: 720, devicePixelRatio: 1 };
+  const previous = Object.fromEntries(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  Object.assign(globalThis, globals);
+  try {
+    const mask = new Mask();
+    node.parent = { parent: null, worldPosition: { x: 90, y: 30 }, components: [mask, Object.assign(new node.components[0].constructor(), { contentSize: { width: 20, height: 40 } })] };
+    let probes = 0;
+    node.components[0].hitTest = (point: { x: number; y: number }) => { probes++; return point.x >= 80 && point.x <= 100 && point.y >= 10 && point.y <= 50; };
+    assert.deepEqual(inspectCocos({ action: 'nodeInputPoint', uuid: node.uuid }), { x: 90, y: 690 });
+    assert.equal(probes, 1);
+    node.components[0].hitTest = () => { probes++; return false; };
+    probes = 0;
+    assert.deepEqual(inspectCocos({ action: 'nodeInputPoint', uuid: node.uuid }), { reason: 'MASKED_OR_OUTSIDE_HIT_AREA' });
+    assert.equal(probes, 25);
+    mask._inverted = true;
+    node.components[0].hitTest = (point: { x: number }) => point.x < 80;
+    assert.deepEqual(inspectCocos({ action: 'nodeInputPoint', uuid: node.uuid }), { x: 50, y: 690 });
+    mask._enabled = false;
+    assert.deepEqual(inspectCocos({ action: 'nodeInputPoint', uuid: node.uuid }), { x: 50, y: 690 });
+    mask._enabled = true;
+    mask._inverted = false;
+    node.parent.worldPosition.x = 200;
+    assert.deepEqual(inspectCocos({ action: 'nodeInputPoint', uuid: node.uuid }), { reason: 'MASKED_OR_OUTSIDE_HIT_AREA' });
+  } finally {
+    for (const key of Object.keys(globals)) {
+      const descriptor = previous[key];
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else Reflect.deleteProperty(globalThis, key);
+    }
+  }
+}));
 
 test('scene tree stops traversing once maxNodes is reached', () => withFakeCocos(() => {
   const scene = (globalThis as any).cc.director.getScene();
