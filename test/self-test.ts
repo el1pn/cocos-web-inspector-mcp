@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { crc32, inflateSync } from 'node:zlib';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -1377,5 +1380,30 @@ test('launcher without an endpoint accepts dynamic ports and the connection can 
     await assert.rejects(browser.setEndpoint('http://example.com:9222'));
   } finally {
     await browser.close();
+  }
+});
+
+test('--log-file appends one masked JSON line per tool call, with outcome and no result data', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'call-log-'));
+  const file = join(dir, 'calls.jsonl');
+  const page: any = { url: () => 'http://localhost:3000', evaluate: async (_fn: unknown, request: any) => { if (request.name === 'boom') throw new Error('Cocos node was destroyed'); return { matches: [] }; } };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { logFile: file });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    await client.callTool({ name: 'cocos_find_node', arguments: { name: 'hunter2-secret-token=abcdefgh' } });
+    await client.callTool({ name: 'cocos_find_node', arguments: { name: 'boom' } });
+    const lines = readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0].tool, 'cocos_find_node');
+    assert.equal(lines[0].ok, true);
+    assert.equal(typeof lines[0].ms, 'number');
+    assert.equal(lines[1].tool, 'cocos_find_node');
+    assert.equal(lines[1].ok, false);
+    assert.doesNotMatch(JSON.stringify(lines[0].args), /abcdefgh/);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+    rmSync(dir, { recursive: true, force: true });
   }
 });

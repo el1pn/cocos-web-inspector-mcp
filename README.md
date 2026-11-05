@@ -27,7 +27,7 @@ npx --yes cocos-web-inspector-mcp launch http://localhost:7456/
 npx --yes cocos-web-inspector-mcp launch http://localhost:7456/ --port 9223 --device iphone-14 --landscape --cpu-slowdown 4 --network fast-3g
 ```
 
-`launch` options: `--port` (default `9222`), `--profile <dir>` (default a per-port directory under the system temp folder), `--chrome-path` (or `CHROME_PATH`), and the `cocos_emulate_device` settings `--device`, `--landscape`, `--cpu-slowdown`, and `--network`. Chrome drops emulation when its controlling CDP session closes, so with emulation flags the command stays attached; press Ctrl+C to close Chrome. The MCP server itself launches a browser only with `--allow-launch` (see below).
+`launch` options: `--port` (default `9222`), `--profile <dir>` (default a per-port directory under the system temp folder), `--chrome-path` (or `CHROME_PATH`), `--always-on-top` (macOS only, needs yabai with its scripting addition; pins Chrome windows above others), and the `cocos_emulate_device` settings `--device`, `--landscape`, `--cpu-slowdown`, and `--network`. Chrome drops emulation when its controlling CDP session closes, so with emulation flags the command stays attached; press Ctrl+C to close Chrome. The MCP server itself launches a browser only with `--allow-launch` (see below).
 
 Check a setup step by step, with a fix for each failure:
 
@@ -141,6 +141,8 @@ The endpoint may instead be provided through the MCP process environment:
   }
 }
 ```
+
+Add `--log-file <path>` to append one JSON line per tool call (tool, masked arguments, duration, outcome, response size; never results) for debugging.
 
 Add `--allow-runtime-mutation` for debugger tools, `--allow-browser-data` for console, network, and storage tools, `--allow-method-call` for `cocos_call_method`, and `--allow-launch` for `cocos_open_page` and `cocos_close_page`; each flag registers only its own tools.
 

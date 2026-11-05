@@ -34,9 +34,33 @@ function listener(port: string): string | undefined {
   }
 }
 
+// macOS has no public API to float another app's window; yabai (scripting addition loaded) can.
+function yabaiPath(): string {
+  if (process.platform !== 'darwin') throw new Error('--always-on-top is only supported on macOS (needs yabai)');
+  try {
+    return execFileSync('which', ['yabai'], { encoding: 'utf8' }).trim();
+  } catch {
+    throw new Error('--always-on-top needs yabai on PATH with its scripting addition loaded (https://github.com/koekeishiya/yabai)');
+  }
+}
+
+async function pinWindows(pid: number): Promise<void> {
+  const yabai = yabaiPath();
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const windows = (JSON.parse(execFileSync(yabai, ['-m', 'query', '--windows'], { encoding: 'utf8' })) as { id: number; pid: number }[]).filter(window => window.pid === pid);
+    if (windows.length) {
+      for (const window of windows) execFileSync(yabai, ['-m', 'window', String(window.id), '--layer', 'above'], { stdio: ['ignore', 'ignore', 'inherit'] });
+      return;
+    }
+    if (Date.now() > deadline) throw new Error('--always-on-top: yabai did not report a Chrome window within 10s');
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+}
+
 async function launch(args: string[]): Promise<void> {
-  const { values, positional } = flags(args, ['--port', '--profile', '--chrome-path', '--device', '--cpu-slowdown', '--network'], ['--landscape']);
-  if (positional.length !== 1) throw new Error('Usage: cocos-web-inspector-mcp launch <url> [--port 9222] [--profile <dir>] [--chrome-path <path>] [--device <preset>] [--landscape] [--cpu-slowdown <1-20>] [--network <profile>]');
+  const { values, positional } = flags(args, ['--port', '--profile', '--chrome-path', '--device', '--cpu-slowdown', '--network'], ['--landscape', '--always-on-top']);
+  if (positional.length !== 1) throw new Error('Usage: cocos-web-inspector-mcp launch <url> [--port 9222] [--profile <dir>] [--chrome-path <path>] [--device <preset>] [--landscape] [--cpu-slowdown <1-20>] [--network <profile>] [--always-on-top]');
   const url = validateLocalUrl(positional[0]!, true).href;
   const port = Number(values['--port'] ?? 9222);
   if (!Number.isInteger(port) || port < 1_024 || port > 65_535) throw new Error('--port must be an integer from 1024 to 65535');
@@ -47,6 +71,7 @@ async function launch(args: string[]): Promise<void> {
   const cpuSlowdown = values['--cpu-slowdown'] === undefined ? undefined : Number(values['--cpu-slowdown']);
   if (cpuSlowdown !== undefined && !(cpuSlowdown >= 1 && cpuSlowdown <= 20)) throw new Error('--cpu-slowdown must be from 1 to 20');
   if (values['--landscape'] && !device) throw new Error('--landscape needs --device');
+  if (values['--always-on-top']) yabaiPath();
 
   const endpoint = `http://127.0.0.1:${port}`;
   if ((await probe(endpoint)).status !== 'down') throw new Error(`Port ${port} is already in use${listener(String(port)) ? ` by ${listener(String(port))}` : ''}; pass --port or stop that process`);
@@ -67,6 +92,8 @@ async function launch(args: string[]): Promise<void> {
     if (chrome.exitCode !== null || Date.now() > deadline) throw new Error(`Chrome did not open remote debugging on port ${port}`);
     await new Promise(resolve => setTimeout(resolve, 200));
   }
+
+  if (values['--always-on-top']) await pinWindows(chrome.pid!);
 
   const emulating = device || cpuSlowdown !== undefined || network;
   if (emulating) {

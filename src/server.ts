@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
 import type { ChromeLauncher } from './chrome.js';
 import { nativeCaptureNode, nativeClick,nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativePressKey, nativeTypeText, type NativeConnection } from './native.js';
+import { logToolCalls } from './call-log.js';
 import { consoleMessages, networkRequest, networkRequests, storage } from './browser-data.js';
 import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fitsResponse, inspectCocosPage, networkProfileNames, keyPattern, pressKey, runBridge, typeText, type BridgeRequest } from './bridge.js';
 
@@ -85,8 +86,9 @@ function failure(error: unknown) {
   return { ...response({ code, message }), isError: true };
 }
 
-export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowMethodCall?: boolean; launcher?: ChromeLauncher; native?: boolean } = {}): McpServer {
+export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowMethodCall?: boolean; launcher?: ChromeLauncher; native?: boolean; logFile?: string } = {}): McpServer {
   const server = new McpServer({ name: 'cocos-web-inspector-mcp', version });
+  if (options.logFile) logToolCalls(server, options.logFile);
   // A native (JSB) runtime has no page: screenshots and device emulation need a browser,
   // the DOM overlays draw nothing, the 2D batcher runs in C++ where analyze_batches cannot observe it,
   // and game.step renders outside the native frame loop, which crashed a 3.8.8 Android build in the GFX pipeline.

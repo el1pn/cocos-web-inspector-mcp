@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## Unreleased
 
+### Added
+
+- `--log-file <path>` appends one JSON line per tool call (time, tool, masked arguments, duration, ok, error, response bytes) for debugging. Results are never logged.
+- `launch --always-on-top` (macOS) pins the Chrome windows above other apps through yabai. It fails fast when yabai is missing or the platform is not macOS.
+
 ### Changed
 
 - A web tool call that the page never answers now fails after 45 s with `EVALUATE_TIMEOUT` instead of hanging. The error says whether the page main thread is blocked (debugger pause, busy loop) or responsive (hidden or throttled tab), and the server logs the same line to stderr.
