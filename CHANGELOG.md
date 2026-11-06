@@ -6,6 +6,7 @@ All notable changes are documented here.
 
 ### Added
 
+- `--allow-recording` registers `cocos_start_recording` and `cocos_stop_recording`. Web recordings use Chromium screencast frames and `ffmpeg`; native Android recordings use `adb screenrecord`. Both return a local MP4 path under a server-controlled directory.
 - `--log-file <path>` appends one JSON line per tool call (time, tool, masked arguments, duration, ok, error, response bytes) for debugging. Results are never logged.
 - `launch --always-on-top` (macOS) pins the Chrome windows above other apps through yabai. It fails fast when yabai is missing or the platform is not macOS.
 - `--allow-web-pages` registers `browser_list_pages` and `browser_page_snapshot` for bounded rendered text and semantic element inspection of explicitly selected attached HTTP(S) tabs, including remote HTTPS pages. The tools omit HTML, form values, cookies, and arbitrary evaluation, and mask secret-like text on a best-effort basis.

@@ -931,6 +931,41 @@ test('MCP generic browser tools require opt-in and read bounded remote page text
   }
 });
 
+test('recording tools are opt-in and keep paths inside the configured output directory', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cocos-recording-test-'));
+  const browser = new BrowserConnection('http://127.0.0.1:9222');
+  const disabledServer = createServer(browser);
+  const disabledClient = new Client({ name: 'self-test', version: '1.0.0' });
+  const [disabledClientTransport, disabledServerTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([disabledServer.connect(disabledServerTransport), disabledClient.connect(disabledClientTransport)]);
+    assert.equal((await disabledClient.listTools()).tools.some(tool => tool.name.includes('recording')), false);
+  } finally {
+    await Promise.allSettled([disabledClient.close(), disabledServer.close()]);
+  }
+
+  const page: any = { url: () => 'http://localhost:3000/' };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowRecording: true, recordingDir: root });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const tools = (await client.listTools()).tools;
+    for (const name of ['cocos_start_recording', 'cocos_stop_recording']) {
+      const tool = tools.find(candidate => candidate.name === name);
+      assert.ok(tool, name);
+      assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
+    }
+    for (const fileName of ['../escape.mp4', '/tmp/escape.mp4', 'video.webm', '']) {
+      assert.equal((await client.callTool({ name: 'cocos_start_recording', arguments: { fileName } })).isError, true, fileName);
+    }
+    assert.equal((await client.callTool({ name: 'cocos_stop_recording', arguments: {} })).isError, true);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('MCP omits runtime mutation tools by default', async () => {
   const browser = new BrowserConnection('http://127.0.0.1:9222');
   const server = createServer(browser);
@@ -1238,6 +1273,7 @@ test('MCP in native mode omits tools that need a browser page', async () => {
     const names = (await client.listTools()).tools.map(tool => tool.name);
     for (const name of ['cocos_emulate_device', 'cocos_analyze_batches', 'cocos_highlight_node', 'cocos_get_selection', 'cocos_step_frame']) assert.equal(names.includes(name), false, name);
     for (const name of ['cocos_capture_node', 'cocos_scene_tree', 'cocos_set_node_active', 'cocos_explain_click', 'cocos_explain_visibility', 'cocos_explain_layout', 'cocos_animation_report', 'cocos_frame_profile', 'cocos_event_trace', 'cocos_pause', 'cocos_click_node', 'cocos_drag_node', 'cocos_type_text', 'cocos_press_key', 'cocos_console_messages', 'cocos_network_requests', 'cocos_network_request', 'cocos_storage']) assert.ok(names.includes(name), name);
+    assert.equal(names.includes('cocos_start_recording'), false);
   } finally {
     await Promise.allSettled([client.close(), server.close(), native.close()]);
   }

@@ -5,13 +5,14 @@ import { ChromeLauncher } from './chrome.js';
 import { NativeConnection } from './native.js';
 import { createServer } from './server.js';
 
-function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: string | undefined; allowRuntimeMutation: boolean; allowBrowserData: boolean; allowWebPages: boolean; allowMethodCall: boolean; allowLaunch: boolean; explicitEndpoint: boolean; logFile: string | undefined } {
+function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: string | undefined; allowRuntimeMutation: boolean; allowBrowserData: boolean; allowWebPages: boolean; allowMethodCall: boolean; allowRecording: boolean; allowLaunch: boolean; explicitEndpoint: boolean; logFile: string | undefined } {
   let endpoint = process.env.COCOS_CDP_ENDPOINT ?? 'http://127.0.0.1:9222';
   let nativeEndpoint: string | undefined;
   let allowRuntimeMutation = false;
   let allowBrowserData = false;
   let allowWebPages = false;
   let allowMethodCall = false;
+  let allowRecording = false;
   let allowLaunch = false;
   let logFile: string | undefined;
   let explicitEndpoint = !!process.env.COCOS_CDP_ENDPOINT;
@@ -31,6 +32,10 @@ function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: st
     }
     if (arg === '--allow-method-call') {
       allowMethodCall = true;
+      continue;
+    }
+    if (arg === '--allow-recording') {
+      allowRecording = true;
       continue;
     }
     if (arg === '--allow-launch') {
@@ -56,7 +61,7 @@ function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: st
     }
     if (arg.startsWith('-')) throw new Error(`Unknown argument: ${arg}`);
   }
-  return { endpoint, nativeEndpoint, allowRuntimeMutation, allowBrowserData, allowWebPages, allowMethodCall, allowLaunch, explicitEndpoint, logFile };
+  return { endpoint, nativeEndpoint, allowRuntimeMutation, allowBrowserData, allowWebPages, allowMethodCall, allowRecording, allowLaunch, explicitEndpoint, logFile };
 }
 
 async function main(): Promise<void> {
@@ -67,7 +72,7 @@ async function main(): Promise<void> {
   if (options.allowWebPages && options.nativeEndpoint) throw new Error('--allow-web-pages cannot be combined with --native-endpoint');
   const browser = options.nativeEndpoint ? new NativeConnection(options.nativeEndpoint) : new BrowserConnection(options.endpoint);
   const launcher = options.allowLaunch && browser instanceof BrowserConnection ? new ChromeLauncher(options.explicitEndpoint ? options.endpoint : undefined, browser) : undefined;
-  const server = createServer(browser, { allowRuntimeMutation: options.allowRuntimeMutation, allowBrowserData: options.allowBrowserData, allowWebPages: options.allowWebPages, allowMethodCall: options.allowMethodCall, ...(launcher && { launcher }), ...(options.logFile && { logFile: options.logFile }), native: !!options.nativeEndpoint });
+  const server = createServer(browser, { allowRuntimeMutation: options.allowRuntimeMutation, allowBrowserData: options.allowBrowserData, allowWebPages: options.allowWebPages, allowMethodCall: options.allowMethodCall, allowRecording: options.allowRecording, ...(launcher && { launcher }), ...(options.logFile && { logFile: options.logFile }), native: !!options.nativeEndpoint });
   let closing = false;
   const close = async () => {
     if (closing) return;

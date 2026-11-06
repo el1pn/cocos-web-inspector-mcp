@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { BrowserConnection, InspectorError, sanitizeUrl, validateWebPageUrl } from './browser.js';
 import type { ChromeLauncher } from './chrome.js';
 import { nativeCaptureNode, nativeClick,nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativePressKey, nativeTypeText, type NativeConnection } from './native.js';
+import { RecordingManager } from './recording.js';
 import { logToolCalls } from './call-log.js';
 import { consoleMessages, networkRequest, networkRequests, pageSnapshot, redactText, storage } from './browser-data.js';
 import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fitsResponse, inspectCocosPage, networkProfileNames, keyPattern, pressKey, runBridge, typeText, type BridgeRequest } from './bridge.js';
@@ -86,8 +87,11 @@ function failure(error: unknown) {
   return { ...response({ code, message }), isError: true };
 }
 
-export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowWebPages?: boolean; allowMethodCall?: boolean; launcher?: ChromeLauncher; native?: boolean; logFile?: string } = {}): McpServer {
+export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowWebPages?: boolean; allowMethodCall?: boolean; allowRecording?: boolean; launcher?: ChromeLauncher; native?: boolean; logFile?: string; recordingDir?: string } = {}): McpServer {
   const server = new McpServer({ name: 'cocos-web-inspector-mcp', version });
+  const recording = new RecordingManager(!!options.native, options.recordingDir);
+  const closeServer = server.close.bind(server);
+  server.close = async () => { await recording.close(); await closeServer(); };
   if (options.logFile) logToolCalls(server, options.logFile);
   // A native (JSB) runtime has no page: screenshots and device emulation need a browser,
   // the DOM overlays draw nothing, the 2D batcher runs in C++ where analyze_batches cannot observe it,
@@ -488,6 +492,20 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     inputSchema: obj({ pageUrl, type: blank(z.string().min(1).max(120)), unusedOnly: z.boolean().optional(), limit: z.number().int().min(1).max(500).optional() }),
     annotations: readOnly,
   }, input => execute({ action: 'assetReport', type: input.type, unusedOnly: input.unusedOnly, limit: input.limit }, input.pageUrl));
+
+  if (options.allowRecording) {
+    server.registerTool('cocos_start_recording', {
+      description: `Start recording the selected Cocos ${web ? 'browser page through Chromium CDP' : 'Android display through adb screenrecord'}. Only one recording may run per server. The MP4 is written under the server-controlled recording directory; fileName may choose only its base name.`,
+      inputSchema: obj({ pageUrl, fileName: blank(z.string().min(5).max(124).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*\.mp4$/)) }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    }, input => run(async () => recording.start(await browser.page(input.pageUrl), input.fileName)));
+
+    server.registerTool('cocos_stop_recording', {
+      description: 'Stop the active recording, finalize its MP4, and return the local absolute file path. pageUrl, when supplied, must match the recorded page.',
+      inputSchema: obj({ pageUrl }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    }, input => run(async () => recording.stop(input.pageUrl)));
+  }
 
   if (options.launcher && web) {
     const launcher = options.launcher;
