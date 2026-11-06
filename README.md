@@ -12,7 +12,7 @@ The current MVP supports:
 - Scene, node, component, and public-property inspection
 - Temporary DOM-only node highlighting
 
-By default it does not edit Cocos game state, launch browsers (`--allow-launch` opts in), expose browser console/network/storage data, or support Firefox/WebKit. Runtime mutations require the explicit `--allow-runtime-mutation` startup flag and affect the attached web build only. Console, network, and storage tools require the separate `--allow-browser-data` flag.
+By default it does not edit Cocos game state, launch browsers (`--allow-launch` opts in), expose browser console/network/storage data, inspect remote web pages, or support Firefox/WebKit. Runtime mutations require the explicit `--allow-runtime-mutation` startup flag and affect the attached web build only. Console, network, and storage tools require the separate `--allow-browser-data` flag. Bounded rendered text and semantic element inspection of attached HTTP(S) tabs requires `--allow-web-pages`.
 
 ## Requirements
 
@@ -144,7 +144,7 @@ The endpoint may instead be provided through the MCP process environment:
 
 Add `--log-file <path>` to append one JSON line per tool call (tool, masked arguments, duration, outcome, response size; never results) for debugging.
 
-Add `--allow-runtime-mutation` for debugger tools, `--allow-browser-data` for console, network, and storage tools, `--allow-method-call` for `cocos_call_method`, and `--allow-launch` for `cocos_open_page` and `cocos_close_page`; each flag registers only its own tools.
+Add `--allow-runtime-mutation` for debugger tools, `--allow-browser-data` for console, network, and storage tools, `--allow-web-pages` for bounded inspection of attached HTTP(S) tabs, `--allow-method-call` for `cocos_call_method`, and `--allow-launch` for `cocos_open_page` and `cocos_close_page`; each flag registers only its own tools.
 
 ## Tools
 
@@ -152,6 +152,8 @@ All tool input objects are strict. Unknown fields are rejected. Inspection tools
 
 | Tool | Purpose | Inputs |
 | --- | --- | --- |
+| `browser_list_pages` | List bounded sanitized URL and title summaries for attached HTTP(S) tabs, including remote HTTPS pages. Registered only with `--allow-web-pages`. | None |
+| `browser_page_snapshot` | Return bounded rendered `innerText` plus semantic element metadata for headings, links, controls, roles, and ARIA labels. Hidden, script, and style text is omitted; it never returns HTML, form values, cookies, or arbitrary evaluation results. Registered only with `--allow-web-pages`. | `pageUrl?`; `selector?`; `maxChars?` `1..100000`, default `50000`; `maxElements?` `1..500`, default `200` |
 | `cocos_list_pages` | List bounded summaries of eligible localhost pages, including sanitized URL, title, Cocos detection, version, and scene name. | None |
 | `cocos_runtime_info` | Return bounded engine, scene, canvas, view, director, and node-count information. | `pageUrl?` |
 | `cocos_runtime_diagnostics` | Return passive bounded hierarchy counts, depth, duplicate names, and render metrics (FPS, frame time, draw calls, triangles, instances). | `pageUrl?` |
@@ -240,6 +242,7 @@ Responses are intentionally bounded:
 - Serialized strings: maximum `2,000` characters
 - Node names: maximum `500` characters
 - Page discovery: maximum `50` eligible pages
+- Generic page snapshot: maximum `100,000` text characters and `500` semantic elements
 - Runtime node count: maximum `5,000` traversed nodes
 
 Truncation is reported instead of silently returning an unbounded object.
@@ -253,9 +256,9 @@ CDP endpoints may use HTTP, HTTPS, WS, or WSS only on these loopback hosts:
 - IPv4 `127.0.0.0/8`
 - IPv6 `::1`
 
-CDP endpoint credentials, query strings, and fragments are rejected. Page targets must use HTTP or HTTPS on loopback.
+CDP endpoint credentials, query strings, and fragments are rejected. Cocos page targets must use HTTP or HTTPS on loopback. With `--allow-web-pages`, generic browser targets may be any attached HTTP(S) page; selection is exact and the CDP endpoint remains loopback-only.
 
-The server never exposes arbitrary JavaScript evaluation or cookie values. `cocos_call_method` (only with `--allow-method-call`) runs existing public methods of game objects; it cannot run new code, refuses `_`-prefixed, secret-like, `constructor`, and `destroy` members, and returns results through the property serializer, so getters are not invoked and secret-like keys are dropped. A called method still runs with the game's full privileges.
+The server never exposes arbitrary JavaScript evaluation or cookie values. `browser_page_snapshot` returns only normalized text and a fixed semantic element projection; it excludes HTML and input values. Its best-effort text redaction uses the same secret patterns as browser-data tools. `cocos_call_method` (only with `--allow-method-call`) runs existing public methods of game objects; it cannot run new code, refuses `_`-prefixed, secret-like, `constructor`, and `destroy` members, and returns results through the property serializer, so getters are not invoked and secret-like keys are dropped. A called method still runs with the game's full privileges.
 
 Console messages, network requests, and storage are available only with `--allow-browser-data`, as `cocos_console_messages`, `cocos_network_requests`, `cocos_network_request`, and `cocos_storage`. Without the flag those tools are not registered. With it, redaction is best effort and runs before data leaves the server:
 

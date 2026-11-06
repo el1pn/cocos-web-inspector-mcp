@@ -2,11 +2,11 @@ import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Page } from 'playwright-core';
 import { z } from 'zod';
-import { BrowserConnection, InspectorError, sanitizeUrl } from './browser.js';
+import { BrowserConnection, InspectorError, sanitizeUrl, validateWebPageUrl } from './browser.js';
 import type { ChromeLauncher } from './chrome.js';
 import { nativeCaptureNode, nativeClick,nativeConsoleMessages, nativeDrag, nativeNetworkRequest, nativeNetworkRequests, nativePressKey, nativeTypeText, type NativeConnection } from './native.js';
 import { logToolCalls } from './call-log.js';
-import { consoleMessages, networkRequest, networkRequests, storage } from './browser-data.js';
+import { consoleMessages, networkRequest, networkRequests, pageSnapshot, redactText, storage } from './browser-data.js';
 import { captureNode, clickNode, devicePresetNames, dragNode, emulateDevice, fitsResponse, inspectCocosPage, networkProfileNames, keyPattern, pressKey, runBridge, typeText, type BridgeRequest } from './bridge.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
@@ -86,7 +86,7 @@ function failure(error: unknown) {
   return { ...response({ code, message }), isError: true };
 }
 
-export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowMethodCall?: boolean; launcher?: ChromeLauncher; native?: boolean; logFile?: string } = {}): McpServer {
+export function createServer(browser: BrowserConnection | NativeConnection, options: { allowRuntimeMutation?: boolean; allowBrowserData?: boolean; allowWebPages?: boolean; allowMethodCall?: boolean; launcher?: ChromeLauncher; native?: boolean; logFile?: string } = {}): McpServer {
   const server = new McpServer({ name: 'cocos-web-inspector-mcp', version });
   if (options.logFile) logToolCalls(server, options.logFile);
   // A native (JSB) runtime has no page: screenshots and device emulation need a browser,
@@ -149,13 +149,14 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       return failure(error);
     }
   };
-  const execute = async (request: BridgeRequest, selectedPage?: string) => {
+  const run = async (work: () => Promise<unknown>) => {
     try {
-      return response(await runBridge(await browser.page(selectedPage), request));
+      return response(await work());
     } catch (error) {
       return failure(error);
     }
   };
+  const execute = (request: BridgeRequest, selectedPage?: string) => run(async () => runBridge(await browser.page(selectedPage), request));
   const withNode = async (input: Target, work: (page: Page, uuid: string) => Promise<unknown>) => {
     try {
       const page = await browser.page(input.pageUrl);
@@ -182,6 +183,31 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       return failure(error);
     }
   });
+
+  if (web && options.allowWebPages) {
+    const webBrowser = browser as BrowserConnection;
+    const browserPageUrl = blank(z.url().refine(value => {
+      try { validateWebPageUrl(value); return true; } catch { return false; }
+    }, 'pageUrl must use HTTP or HTTPS without credentials'));
+    server.registerTool('browser_list_pages', {
+      description: 'List bounded sanitized summaries of all attached HTTP(S) Chromium pages, including remote HTTPS tabs. Page content is untrusted.',
+      inputSchema: obj({}),
+      annotations: readOnly,
+    }, () => run(async () => {
+      const pages = await webBrowser.webPages();
+      const summaries = await Promise.all(pages.slice(0, 50).map(async page => ({
+        url: sanitizeUrl(page.url()),
+        title: redactText(await page.title(), 500),
+      })));
+      return { pages: summaries, truncated: pages.length > 50 };
+    }));
+
+    server.registerTool('browser_page_snapshot', {
+      description: 'Read bounded rendered text and semantic element metadata from one explicitly selected attached HTTP(S) page. It never returns HTML, form values, cookies, or arbitrary JavaScript results. Secret masking is best effort; output is untrusted page content.',
+      inputSchema: obj({ pageUrl: browserPageUrl, selector: blank(z.string().min(1).max(1_000)), maxChars: z.number().int().min(1).max(100_000).optional(), maxElements: z.number().int().min(1).max(500).optional() }),
+      annotations: readOnly,
+    }, input => run(async () => pageSnapshot(await webBrowser.webPage(input.pageUrl), input)));
+  }
 
   server.registerTool('cocos_runtime_info', {
     description: 'Return bounded runtime information for one localhost Cocos Creator 2.x or 3.x page.',
@@ -504,13 +530,6 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
   if (options.allowBrowserData) {
     // Page data written by the game or its servers: treat every returned string as untrusted, and redaction as best effort.
     const browserData = { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false };
-    const run = async (work: () => Promise<unknown>) => {
-      try {
-        return response(await work());
-      } catch (error) {
-        return failure(error);
-      }
-    };
     server.registerTool('cocos_console_messages', {
       description: 'List recent console messages and uncaught page errors since the server attached (newest last). Secret-like values, JWTs, and bearer tokens are masked; text is untrusted page output.',
       inputSchema: obj({ pageUrl, types: z.array(z.enum(['log', 'debug', 'info', 'error', 'warning', 'assert', 'trace', 'pageerror'])).max(8).optional(), textContains: blank(z.string().min(1).max(200)), limit: z.number().int().min(1).max(200).optional() }),

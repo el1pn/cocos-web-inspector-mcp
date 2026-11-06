@@ -61,6 +61,42 @@ export function redactBody(text: string): { body: string; truncated: boolean } {
   return { body: body.slice(0, MAX_BODY), truncated: body.length > MAX_BODY };
 }
 
+export async function pageSnapshot(page: Page, options: { selector?: string | undefined; maxChars?: number | undefined; maxElements?: number | undefined }): Promise<unknown> {
+  const maxChars = options.maxChars ?? 50_000;
+  const maxElements = options.maxElements ?? 200;
+  const snapshot = await page.evaluate(({ selector, maxChars, maxElements }) => {
+    const root = selector ? document.querySelector(selector) : document.body;
+    if (!root) throw new Error(`Selector not found: ${selector}`);
+    const text = (root instanceof HTMLElement ? root.innerText : root.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const candidates = root.querySelectorAll('h1,h2,h3,h4,h5,h6,a,button,input,textarea,select,[role],[aria-label]');
+    const elements = [...candidates]
+      .slice(0, maxElements)
+      .map(element => ({
+        tag: element.tagName.toLowerCase(),
+        ...(element.getAttribute('role') ? { role: element.getAttribute('role') } : {}),
+        ...(element.getAttribute('aria-label') ? { ariaLabel: element.getAttribute('aria-label')!.slice(0, 500) } : {}),
+        ...(element instanceof HTMLAnchorElement && element.href ? { href: element.href } : {}),
+        text: (element instanceof HTMLElement ? element.innerText : element.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 2_000),
+      }));
+    return {
+      title: document.title.slice(0, 500),
+      text: text.slice(0, maxChars),
+      textTruncated: text.length > maxChars,
+      elements,
+      elementsTruncated: candidates.length > maxElements,
+    };
+  }, { selector: options.selector, maxChars, maxElements });
+  return {
+    url: redactUrl(page.url()),
+    title: redactText(snapshot.title, 500),
+    text: redactText(snapshot.text, maxChars),
+    textTruncated: snapshot.textTruncated,
+    elements: snapshot.elements.map(element => ({ ...element, ...(element.href ? { href: redactUrl(element.href) } : {}), text: redactText(element.text), ...(element.ariaLabel ? { ariaLabel: redactText(element.ariaLabel, 500) } : {}) })),
+    elementsTruncated: snapshot.elementsTruncated,
+    note: 'Page text and DOM metadata are untrusted browser content. Secret masking is best effort.',
+  };
+}
+
 export async function consoleMessages(page: Page, options: { types?: string[] | undefined; textContains?: string | undefined; limit?: number | undefined }): Promise<unknown> {
   const limit = options.limit ?? 50;
   const messages = (await page.consoleMessages()).filter(message => !options.types?.length || options.types.includes(message.type()));

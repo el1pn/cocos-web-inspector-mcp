@@ -34,18 +34,28 @@ function isLoopbackHostname(hostname: string): boolean {
   return !!match && match.slice(1).every(part => Number(part) <= 255) && match[1] === '127';
 }
 
-export function validateLocalUrl(raw: string, page = false): URL {
-  let url: URL;
+function parseUrl(raw: string): URL {
   try {
-    url = new URL(raw);
+    return new URL(raw);
   } catch {
     throw new Error('Invalid URL');
   }
+}
+
+export function validateLocalUrl(raw: string, page = false): URL {
+  const url = parseUrl(raw);
   const protocols = page ? PAGE_PROTOCOLS : LOOPBACK_PROTOCOLS;
   if (!protocols.has(url.protocol)) throw new Error(`Unsupported ${page ? 'page' : 'CDP'} URL protocol`);
   if (url.username || url.password) throw new Error('URL credentials are not allowed');
   if (!page && (url.search || url.hash)) throw new Error('CDP URL query and fragment are not allowed');
   if (!isLoopbackHostname(url.hostname)) throw new Error('Only localhost targets are allowed');
+  return url;
+}
+
+export function validateWebPageUrl(raw: string): URL {
+  const url = parseUrl(raw);
+  if (!PAGE_PROTOCOLS.has(url.protocol)) throw new Error('Unsupported page URL protocol');
+  if (url.username || url.password) throw new Error('URL credentials are not allowed');
   return url;
 }
 
@@ -77,12 +87,24 @@ export class BrowserConnection {
   }
 
   async pages(): Promise<Page[]> {
+    return this.#pages(url => validateLocalUrl(url, true));
+  }
+
+  async page(pageUrl?: string): Promise<Page> {
+    return this.#selectPage(await this.pages(), pageUrl, true);
+  }
+
+  async webPages(): Promise<Page[]> {
+    return this.#pages(validateWebPageUrl);
+  }
+
+  async #pages(validate: (url: string) => URL): Promise<Page[]> {
     if (this.#closed) throw new Error('Browser connection is closed');
     const browser = await this.#connect();
     if (this.#closed) throw new Error('Browser connection is closed');
     return browser.contexts().flatMap(context => context.pages()).filter(candidate => {
       try {
-        validateLocalUrl(candidate.url(), true);
+        validate(candidate.url());
         return true;
       } catch {
         return false;
@@ -90,10 +112,13 @@ export class BrowserConnection {
     });
   }
 
-  async page(pageUrl?: string): Promise<Page> {
-    const pages = await this.pages();
+  async webPage(pageUrl?: string): Promise<Page> {
+    return this.#selectPage(await this.webPages(), pageUrl, false);
+  }
+
+  #selectPage(pages: Page[], pageUrl: string | undefined, local: boolean): Page {
     if (pageUrl) {
-      const wantedUrl = validateLocalUrl(pageUrl, true);
+      const wantedUrl = local ? validateLocalUrl(pageUrl, true) : validateWebPageUrl(pageUrl);
       const wanted = wantedUrl.href;
       let selected = pages.filter(candidate => new URL(candidate.url()).href === wanted);
       // A pageUrl without query and fragment selects the open page that differs only by them, when that is unambiguous.
@@ -103,15 +128,15 @@ export class BrowserConnection {
       }
       if (selected.length === 0) {
         const open = pages.slice(0, 10).map(candidate => sanitizeUrl(candidate.url())).join(', ');
-        throw new InspectorError('PAGE_NOT_FOUND', `Local page not found: ${sanitizeUrl(pageUrl)} (pageUrl must equal the full open page URL including query and fragment, or omit both when only one open page has that path; open pages, shown without them: ${open || 'none'})`);
+        throw new InspectorError('PAGE_NOT_FOUND', `${local ? 'Local p' : 'P'}age not found: ${sanitizeUrl(pageUrl)} (pageUrl must equal the full open page URL including query and fragment, or omit both when only one open page has that path; open pages, shown without them: ${open || 'none'})`);
       }
-      if (selected.length > 1) throw new InspectorError('MULTIPLE_PAGES', `Multiple localhost pages match pageUrl: ${sanitizeUrl(pageUrl)}; close duplicate tabs or use a separate Chromium per project`);
+      if (selected.length > 1) throw new InspectorError('MULTIPLE_PAGES', `Multiple ${local ? 'localhost ' : ''}pages match pageUrl: ${sanitizeUrl(pageUrl)}; close duplicate tabs or use a separate Chromium profile`);
       return selected[0]!;
     }
-    if (pages.length === 0) throw new InspectorError('NO_LOCAL_PAGE', 'No localhost page is attached to Chromium');
+    if (pages.length === 0) throw new InspectorError('NO_LOCAL_PAGE', `No ${local ? 'localhost ' : ''}HTTP(S) page is attached to Chromium`);
     if (pages.length > 1) {
       const choices = pages.slice(0, 10).map(candidate => sanitizeUrl(candidate.url())).join(', ');
-      throw new InspectorError('MULTIPLE_PAGES', `Multiple localhost pages found; pass pageUrl: ${choices}`);
+      throw new InspectorError('MULTIPLE_PAGES', `Multiple ${local ? 'localhost ' : ''}pages found; pass pageUrl: ${choices}`);
     }
     return pages[0]!;
   }

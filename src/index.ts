@@ -5,11 +5,12 @@ import { ChromeLauncher } from './chrome.js';
 import { NativeConnection } from './native.js';
 import { createServer } from './server.js';
 
-function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: string | undefined; allowRuntimeMutation: boolean; allowBrowserData: boolean; allowMethodCall: boolean; allowLaunch: boolean; explicitEndpoint: boolean; logFile: string | undefined } {
+function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: string | undefined; allowRuntimeMutation: boolean; allowBrowserData: boolean; allowWebPages: boolean; allowMethodCall: boolean; allowLaunch: boolean; explicitEndpoint: boolean; logFile: string | undefined } {
   let endpoint = process.env.COCOS_CDP_ENDPOINT ?? 'http://127.0.0.1:9222';
   let nativeEndpoint: string | undefined;
   let allowRuntimeMutation = false;
   let allowBrowserData = false;
+  let allowWebPages = false;
   let allowMethodCall = false;
   let allowLaunch = false;
   let logFile: string | undefined;
@@ -22,6 +23,10 @@ function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: st
     }
     if (arg === '--allow-browser-data') {
       allowBrowserData = true;
+      continue;
+    }
+    if (arg === '--allow-web-pages') {
+      allowWebPages = true;
       continue;
     }
     if (arg === '--allow-method-call') {
@@ -51,7 +56,7 @@ function optionsFromArgs(args: string[]): { endpoint: string; nativeEndpoint: st
     }
     if (arg.startsWith('-')) throw new Error(`Unknown argument: ${arg}`);
   }
-  return { endpoint, nativeEndpoint, allowRuntimeMutation, allowBrowserData, allowMethodCall, allowLaunch, explicitEndpoint, logFile };
+  return { endpoint, nativeEndpoint, allowRuntimeMutation, allowBrowserData, allowWebPages, allowMethodCall, allowLaunch, explicitEndpoint, logFile };
 }
 
 async function main(): Promise<void> {
@@ -59,9 +64,10 @@ async function main(): Promise<void> {
   if (command === 'launch' || command === 'doctor') return (await import('./cli.js')).commands[command]!(rest);
   const options = optionsFromArgs(process.argv.slice(2));
   if (options.allowLaunch && options.nativeEndpoint) throw new Error('--allow-launch cannot be combined with --native-endpoint');
+  if (options.allowWebPages && options.nativeEndpoint) throw new Error('--allow-web-pages cannot be combined with --native-endpoint');
   const browser = options.nativeEndpoint ? new NativeConnection(options.nativeEndpoint) : new BrowserConnection(options.endpoint);
   const launcher = options.allowLaunch && browser instanceof BrowserConnection ? new ChromeLauncher(options.explicitEndpoint ? options.endpoint : undefined, browser) : undefined;
-  const server = createServer(browser, { allowRuntimeMutation: options.allowRuntimeMutation, allowBrowserData: options.allowBrowserData, allowMethodCall: options.allowMethodCall, ...(launcher && { launcher }), ...(options.logFile && { logFile: options.logFile }), native: !!options.nativeEndpoint });
+  const server = createServer(browser, { allowRuntimeMutation: options.allowRuntimeMutation, allowBrowserData: options.allowBrowserData, allowWebPages: options.allowWebPages, allowMethodCall: options.allowMethodCall, ...(launcher && { launcher }), ...(options.logFile && { logFile: options.logFile }), native: !!options.nativeEndpoint });
   let closing = false;
   const close = async () => {
     if (closing) return;

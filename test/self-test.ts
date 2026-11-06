@@ -6,7 +6,7 @@ import test from 'node:test';
 import { crc32, inflateSync } from 'node:zlib';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { sanitizeUrl, validateLocalUrl, BrowserConnection } from '../src/browser.js';
+import { sanitizeUrl, validateLocalUrl, validateWebPageUrl, BrowserConnection } from '../src/browser.js';
 import { captureNode, clickNode, dragNode, fitsImage, fitsResponse, inspectCocos, pressKey, runBridge, typeText } from '../src/bridge.js';
 import { redactBody, redactHeaders, redactText, redactUrl } from '../src/browser-data.js';
 import { cropPng, inspectorPort, NativeConnection, nativeNetworkRequest, nativeNetworkRequests, parseCocosLogcat } from '../src/native.js';
@@ -90,6 +90,9 @@ test('URL policy accepts loopback and rejects unsafe targets', () => {
   assert.throws(() => validateLocalUrl('http://user:pass@localhost:9222'), /credentials/);
   assert.throws(() => validateLocalUrl('http://localhost:9222?token=x'), /query/);
   assert.throws(() => validateLocalUrl('file:///tmp/page', true), /protocol/);
+  assert.equal(validateWebPageUrl('https://www.example.com/private?page=1').hostname, 'www.example.com');
+  assert.throws(() => validateWebPageUrl('file:///tmp/page'), /protocol/);
+  assert.throws(() => validateWebPageUrl('https://user:pass@example.com'), /credentials/);
   assert.equal(sanitizeUrl('http://user:pass@localhost:9222/path?token=x#hash'), 'http://localhost:9222/path');
 });
 
@@ -871,6 +874,61 @@ test('browser selects a page by path when pageUrl omits the query, and explains 
   await assert.rejects(embedded.page(), /not a standard Chromium remote-debugging browser.*--user-data-dir.*launch.*--cdp-endpoint/);
   assert.equal(options.noDefaults, true);
   await embedded.close();
+});
+
+test('MCP generic browser tools require opt-in and read bounded remote page text', async () => {
+  const remotePage: any = {
+    url: () => 'https://www.example.com/workspace?secret=hidden',
+    title: async () => 'Workspace Authorization: Bearer title-secret-value',
+    evaluate: async (_fn: unknown, input: any) => ({
+      title: 'Workspace',
+      text: 'Authorization: Bearer abcdefghijklmnop visible content',
+      textTruncated: false,
+      elements: [{ tag: 'h1', text: 'Private page' }, { tag: 'a', href: 'https://example.com/path?token=secret', text: 'Link' }],
+      elementsTruncated: false,
+      input,
+    }),
+  };
+  const browser: any = {
+    pages: async () => [],
+    webPages: async () => [remotePage],
+    webPage: async (url?: string) => {
+      if (url && url !== remotePage.url()) throw new Error('unexpected URL');
+      return remotePage;
+    },
+    close: async () => {},
+  };
+  const connect = async (allowWebPages: boolean) => {
+    const server = createServer(browser, { allowWebPages });
+    const client = new Client({ name: 'self-test', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return { server, client };
+  };
+  const disabled = await connect(false);
+  try {
+    assert.ok((await disabled.client.listTools()).tools.every(tool => !tool.name.startsWith('browser_')));
+  } finally {
+    await Promise.allSettled([disabled.client.close(), disabled.server.close()]);
+  }
+  const enabled = await connect(true);
+  try {
+    const names = (await enabled.client.listTools()).tools.map(tool => tool.name);
+    assert.ok(names.includes('browser_list_pages'));
+    assert.ok(names.includes('browser_page_snapshot'));
+    const listed = await enabled.client.callTool({ name: 'browser_list_pages', arguments: {} }) as any;
+    assert.deepEqual(listed.structuredContent.pages, [{ url: 'https://www.example.com/workspace', title: 'Workspace Authorization: [redacted] [redacted]' }]);
+    assert.equal(JSON.stringify(listed.structuredContent).includes('title-secret-value'), false);
+    const snapshot = await enabled.client.callTool({ name: 'browser_page_snapshot', arguments: { pageUrl: remotePage.url(), selector: 'main', maxChars: 1_000, maxElements: 10 } }) as any;
+    assert.equal(snapshot.isError, undefined);
+    assert.equal(snapshot.structuredContent.text.includes('abcdefghijklmnop'), false);
+    assert.match(snapshot.structuredContent.text, /\[redacted\]/);
+    assert.equal(snapshot.structuredContent.elements[1].href, 'https://example.com/path?token=%5Bredacted%5D');
+    assert.equal(snapshot.structuredContent.note.includes('untrusted'), true);
+    assert.equal((await enabled.client.callTool({ name: 'browser_page_snapshot', arguments: { pageUrl: 'file:///tmp/x' } })).isError, true);
+  } finally {
+    await Promise.allSettled([enabled.client.close(), enabled.server.close()]);
+  }
 });
 
 test('MCP omits runtime mutation tools by default', async () => {

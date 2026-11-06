@@ -213,7 +213,7 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
   const profileRoot = await mkdtemp(join(tmpdir(), 'cocos-web-inspector-live-'));
   let launched: { browser: Browser; context: BrowserContext } | undefined;
   const browserConnection = new BrowserConnection(`http://127.0.0.1:${cdpPort}`);
-  const server = createServer(browserConnection, { allowRuntimeMutation: true, allowBrowserData: true, allowMethodCall: true });
+  const server = createServer(browserConnection, { allowRuntimeMutation: true, allowBrowserData: true, allowWebPages: true, allowMethodCall: true });
   const client = new Client({ name: 'integration-test', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
@@ -228,6 +228,16 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.equal(pages.pages.length, 1);
     assert.deepEqual(pages.pages[0].cocos, { detected: true, version, sceneName: 'InspectorTest' });
     assert.equal(pages.pages[0].url, pageUrl);
+    const browserPages = await call(client, 'browser_list_pages', {});
+    assert.equal(browserPages.pages.length, 1);
+    assert.equal(browserPages.pages[0].url, pageUrl);
+    assert.equal(typeof browserPages.pages[0].title, 'string');
+    const browserSnapshot = await call(client, 'browser_page_snapshot', { pageUrl, selector: 'body', maxChars: 10_000, maxElements: 50 });
+    assert.equal(browserSnapshot.url, pageUrl);
+    assert.equal(typeof browserSnapshot.text, 'string');
+    assert.ok(Array.isArray(browserSnapshot.elements));
+    assert.equal(browserSnapshot.text.includes('<style>'), false);
+    assert.equal(browserSnapshot.text.includes('System.import'), false);
 
     const runtime = await call(client, 'cocos_runtime_info', { pageUrl });
     assert.deepEqual(runtime.scene.name, 'InspectorTest');
