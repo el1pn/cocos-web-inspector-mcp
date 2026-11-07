@@ -807,7 +807,7 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.ok(added.serialization.redacted >= 1);
     assert.equal((await call(client, 'cocos_call_method', { pageUrl, uuid: panelUuid, componentUuid: probe, method: 'target', args: [{ $node: labelNode }] })).result.value, 'TitleLabel');
     assert.equal((await call(client, 'cocos_call_method', { pageUrl, uuid: panelUuid, componentUuid: probe, method: 'target', args: [{ $path: '/InspectorTest/Canvas/Panel/TitleLabel' }] })).result.value, 'TitleLabel');
-    assert.deepEqual((await call(client, 'cocos_call_method', { pageUrl, uuid: panelUuid, componentUuid: probe, method: 'fail' })).threw, { name: 'TypeError', message: 'probe failure' });
+    assert.deepEqual((await call(client, 'cocos_call_method', { pageUrl, uuid: panelUuid, componentUuid: probe, method: 'fail' })).threw, { name: 'Error', message: '[redacted]' });
     assert.deepEqual((await call(client, 'cocos_call_method', { pageUrl, uuid: panelUuid, componentUuid: probe, method: 'later', args: ['x'], awaitMs: 2_000 })).result, { value: 'done:x' });
     const pending = await call(client, 'cocos_call_method', { pageUrl, uuid: panelUuid, componentUuid: probe, method: 'never', awaitMs: 100 });
     assert.equal(pending.timedOut, true);

@@ -57,6 +57,7 @@ async function resolveUuid(page: Page, input: Target): Promise<string> {
   const matches = found.matches ?? [];
   if (matches.length === 0) throw new Error(found.truncated ? 'Node not found within traversal limit' : 'Node not found');
   if (matches.length > 1) throw new InspectorError('AMBIGUOUS_NODE', `Path matches ${found.truncated ? 'more than 10' : matches.length} nodes; pass one uuid: ${matches.map(match => match.uuid).join(', ')}`);
+  if (found.truncated) throw new InspectorError('AMBIGUOUS_NODE', 'Path lookup exceeded the traversal limit; pass a node uuid');
   return matches[0]!.uuid;
 }
 
@@ -169,7 +170,16 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       return failure(error);
     }
   };
-  const executeNode = (input: Target, build: (uuid: string) => BridgeRequest) => withNode(input, (page, uuid) => runBridge(page, build(uuid)));
+  const executeNode = async (input: Target, build: (uuid: string) => BridgeRequest) => {
+    try {
+      const page = await browser.page(input.pageUrl);
+      const result = await runBridge(page, build(await resolveUuid(page, input)));
+      const payload = response(result);
+      return result && typeof result === 'object' && 'partial' in result && result.partial === true ? { ...payload, isError: true } : payload;
+    } catch (error) {
+      return failure(error);
+    }
+  };
 
   server.registerTool('cocos_list_pages', {
     description: 'List bounded summaries of eligible localhost Chromium pages.',
@@ -324,7 +334,7 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     }, input => executeNode(input, uuid => ({ action: 'setNodeActive', uuid, active: input.active })));
 
     server.registerTool('cocos_set_transform', {
-      description: 'Update selected Cocos node position, rotation, or scale by exact UUID.',
+      description: 'Update selected Cocos node position, rotation, or scale by exact UUID. If a setter throws, an error result reports partial: true and the observed before/after state; game setter side effects cannot be rolled back.',
       inputSchema: obj({ pageUrl, ...target, position: vector3.optional(), rotation: quaternion.optional(), scale: vector3.optional() }).refine(oneTarget, oneTargetMessage)
         .refine(value => !!value.position || !!value.rotation || !!value.scale, 'Provide position, rotation, or scale'),
       annotations: runtimeMutation,
@@ -538,9 +548,29 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
   if (options.allowMethodCall) {
     // Not finiteNumber: method arguments include bitmasks such as node layers (1 << 25), which that +-1e6 transform bound rejects.
     const jsonValue: z.ZodType<unknown> = z.lazy(() => z.union([z.null(), z.boolean(), z.number().finite(), z.string().max(10_000), z.array(jsonValue).max(100), z.record(z.string().max(200), jsonValue)]));
+    // Count argument values (including containers), with each top-level argument at depth 1.
+    const jsonValueSchema = { anyOf: [{ type: 'null' }, { type: 'boolean' }, { type: 'number' }, { type: 'string', maxLength: 10_000 }, { type: 'array', maxItems: 100, items: { $ref: '#/$defs/methodJsonValue' } }, { type: 'object', propertyNames: { maxLength: 200 }, additionalProperties: { $ref: '#/$defs/methodJsonValue' } }] };
+    const boundedArgs = z.array(z.unknown()).max(20).refine(args => {
+      const pending = args.map(value => ({ value, depth: 1 }));
+      let count = 0;
+      while (pending.length) {
+        const { value, depth } = pending.pop()!;
+        if (++count > 1_000 || depth > 10) return false;
+        if (value !== null && typeof value === 'object') {
+          for (const child of Object.values(value)) {
+            pending.push({ value: child, depth: depth + 1 });
+            if (count + pending.length > 1_000) return false;
+          }
+        }
+      }
+      return true;
+    }, 'Arguments exceed maximum depth 10 or 1000 total values').meta({
+      description: 'JSON arguments; maximum depth 10 and 1000 total values, including containers.',
+      items: jsonValueSchema,
+    }).pipe(z.array(jsonValue).max(20));
     server.registerTool('cocos_call_method', {
-      description: 'Call one public method on a Cocos node or component selected by UUID, with JSON arguments; {"$node": uuid}, {"$path": path}, {"$component": uuid}, and {"$asset": uuid} pass live objects. Runs arbitrary game code: it can change state, reach servers, or spend currency. Returns the bounded result or the thrown error; awaitMs waits for a returned promise.',
-      inputSchema: obj({ pageUrl, ...target, componentUuid: blank(z.string().min(1)), method: z.string().min(1).max(200).regex(/^[A-Za-z$][\w$]*$/), args: z.array(jsonValue).max(20).optional(), awaitMs: z.number().int().min(0).max(30_000).optional(), maxDepth: z.number().int().min(0).max(6).optional() }, { componentType: 'only componentUuid is accepted; list it with cocos_get_components' }).refine(oneTarget, oneTargetMessage),
+      description: 'Call one public method on a Cocos node or component selected by UUID, with JSON arguments; {"$node": uuid}, {"$path": path}, {"$component": uuid}, and {"$asset": uuid} pass live objects. Runs arbitrary game code: it can change state, reach servers, or spend currency. Returns the bounded result or a redacted thrown error; awaitMs waits for a returned promise.',
+      inputSchema: obj({ pageUrl, ...target, componentUuid: blank(z.string().min(1)), method: z.string().min(1).max(200).regex(/^[A-Za-z$][\w$]*$/), args: boundedArgs.optional(), awaitMs: z.number().int().min(0).max(30_000).optional(), maxDepth: z.number().int().min(0).max(6).optional() }, { componentType: 'only componentUuid is accepted; list it with cocos_get_components' }).refine(oneTarget, oneTargetMessage).meta({ $defs: { methodJsonValue: jsonValueSchema } }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     }, input => executeNode(input, uuid => ({ action: 'callMethod', uuid, componentUuid: input.componentUuid, method: input.method, args: input.args ?? [], awaitMs: input.awaitMs, maxDepth: input.maxDepth })));
   }

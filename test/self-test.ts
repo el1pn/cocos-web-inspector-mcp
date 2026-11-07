@@ -634,6 +634,44 @@ test('node input point intersects Mask bounds and validates irregular masks with
   }
 }));
 
+test('method references reject truncated path and component lookups', () => withFakeCocos(() => {
+  const scene = (globalThis as any).cc.director.getScene();
+  scene.choose = () => { throw new Error('must not call'); };
+  scene.children = Array.from({ length: 5_000 }, (_, i) => ({ uuid: `node-${i}`, name: i === 0 || i === 4_999 ? 'Duplicate' : `node-${i}`, children: [], components: i === 4_999 ? [{ uuid: 'late-component' }] : [] }));
+  assert.throws(() => inspectCocos({ action: 'callMethod', uuid: scene.uuid, method: 'choose', args: [{ $path: '/Scene/Duplicate' }] }), /path lookup exceeded traversal limit/);
+  assert.throws(() => inspectCocos({ action: 'callMethod', uuid: scene.uuid, method: 'choose', args: [{ $component: 'late-component' }] }), /Component not found within traversal limit/);
+}));
+
+test('method calls redact exceptions, handle rejected promises, and clear timers', async () => withFakeCocos(async () => {
+  const node = (globalThis as any).cc.director.getScene().children[0];
+  node.fail = () => { throw new Error('Bearer very-secret-token'); };
+  node.reject = () => Promise.reject(new Error('password=secret'));
+  node.succeed = () => Promise.resolve('done');
+  const call = (method: string, awaitMs?: number) => inspectCocos({ action: 'callMethod', uuid: node.uuid, method, args: [], awaitMs }) as any;
+  assert.deepEqual(call('fail').threw, { name: 'Error', message: '[redacted]' });
+  assert.deepEqual((await call('reject', 100)).threw, { name: 'Error', message: '[redacted]' });
+  assert.equal(call('reject').pending, true);
+  await new Promise(resolve => setImmediate(resolve));
+  const original = globalThis.clearTimeout;
+  let cleared = 0;
+  globalThis.clearTimeout = ((timer: ReturnType<typeof setTimeout>) => { cleared++; original(timer); }) as typeof clearTimeout;
+  try { assert.equal((await call('succeed', 30_000)).result.value, 'done'); assert.equal(cleared, 1); }
+  finally { globalThis.clearTimeout = original; }
+}));
+
+test('transform validates setters first and reports partial mutations', () => withFakeCocos(() => {
+  const node = (globalThis as any).cc.director.getScene().children[0];
+  node.setRotation = undefined;
+  assert.throws(() => inspectCocos({ action: 'setTransform', uuid: node.uuid, position: { x: 1, y: 2, z: 3 }, rotation: { x: 0, y: 0, z: 0, w: 1 } }), /node.setRotation is unavailable/);
+  assert.deepEqual(node.position, { x: 0, y: 0, z: 0 });
+  node.setRotation = () => { throw new Error('secret'); };
+  const result = inspectCocos({ action: 'setTransform', uuid: node.uuid, position: { x: 1, y: 2, z: 3 }, rotation: { x: 0, y: 0, z: 0, w: 1 } }) as any;
+  assert.equal(result.partial, true);
+  assert.equal(result.failed, 'rotation');
+  assert.deepEqual(result.after.position, { x: 1, y: 2, z: 3 });
+  assert.ok(!JSON.stringify(result).includes('secret'));
+}));
+
 test('scene tree stops traversing once maxNodes is reached', () => withFakeCocos(() => {
   const scene = (globalThis as any).cc.director.getScene();
   let reads = 0;
@@ -1156,6 +1194,26 @@ test('MCP exposes opted-in node active mutation with strict input', async () => 
   }
 });
 
+test('MCP reports partial transforms and rejects truncated paths', async () => {
+  const page = { evaluate: async (_fn: unknown, request: { action: string }) => request.action === 'findNode'
+    ? { matches: [{ uuid: 'n' }], truncated: true }
+    : { partial: true, failed: 'rotation', before: {}, after: {} } };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowRuntimeMutation: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const partial = await client.callTool({ name: 'cocos_set_transform', arguments: { uuid: 'n', position: { x: 1, y: 2, z: 3 } } });
+    assert.equal(partial.isError, true);
+    assert.equal((partial.structuredContent as Record<string, unknown>)?.partial, true);
+    const truncated = await client.callTool({ name: 'cocos_get_node', arguments: { path: '/Scene/Node' } });
+    assert.equal(truncated.isError, true);
+    assert.equal((truncated.structuredContent as Record<string, unknown>)?.code, 'AMBIGUOUS_NODE');
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
 test('browser data redaction masks secrets in text, URLs, headers, and bodies', () => {
   // Fake token, assembled at runtime so secret scanners do not flag the fixture.
   const jwt = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjM0NTY3ODkwIn0', 'fake-signature-for-tests'].join('.');
@@ -1204,6 +1262,38 @@ test('MCP registers cocos_call_method only with --allow-method-call', async () =
     }
   } finally {
     await Promise.allSettled([client.close(), server.close(), browser.close()]);
+  }
+});
+
+test('method arguments are bounded before recursive validation', async () => {
+  let calls = 0;
+  const page = { evaluate: async () => { calls++; return { result: 'ok' }; } };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowMethodCall: true });
+  const client = new Client({ name: 'method-validation-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const nested = (depth: number): unknown => { let value: unknown = null; for (let i = 1; i < depth; i++) value = [value]; return value; };
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const tool = (await client.listTools()).tools.find(item => item.name === 'cocos_call_method')!;
+    const schema = tool.inputSchema.properties!.args as any;
+    assert.equal(schema.type, 'array');
+    assert.equal(schema.maxItems, 20);
+    assert.equal(schema.items.anyOf.find((item: any) => item.type === 'array').items.$ref, '#/$defs/methodJsonValue');
+    assert.deepEqual((tool.inputSchema as any).$defs.methodJsonValue, schema.items);
+    const call = async (args: unknown[]) => client.callTool({ name: 'cocos_call_method', arguments: { uuid: 'n', method: 'm', args } });
+    assert.notEqual((await call([nested(10)])).isError, true);
+    assert.equal((await call([nested(11)])).isError, true);
+    assert.equal((await call([nested(500)])).isError, true);
+    const values = Array.from({ length: 10 }, () => Array(99).fill(null));
+    assert.notEqual((await call(values)).isError, true);
+    assert.equal((await call([...values, null])).isError, true);
+    assert.equal((await call([Array(101).fill(null)])).isError, true);
+    assert.equal((await call(['x'.repeat(10_001)])).isError, true);
+    assert.equal((await call([{ ['x'.repeat(201)]: 1 }])).isError, true);
+    assert.equal((await call(Array(21).fill(null))).isError, true);
+    assert.equal(calls, 2);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
   }
 });
 

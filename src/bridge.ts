@@ -1421,21 +1421,24 @@ export function inspectCocos(request: BridgeRequest): unknown {
       ...(request.rotation ? { rotation: snapshot(read.rotation(), ['x', 'y', 'z', 'w']) } : {}),
       ...(request.scale ? { scale: snapshot(read.scale(), ['x', 'y', 'z']) } : {}),
     });
+    const position = request.position && vector(request.position, ['x', 'y', 'z']);
+    const rotation = request.rotation && vector(request.rotation, ['x', 'y', 'z', 'w']);
+    const scale = request.scale && vector(request.scale, ['x', 'y', 'z']);
+    if (position && typeof node.setPosition !== 'function') invalidMutation('node.setPosition is unavailable');
+    if (rotation && typeof node.setRotation !== 'function') invalidMutation('node.setRotation is unavailable');
+    if (scale && typeof node.setScale !== 'function') invalidMutation('node.setScale is unavailable');
     const before = state();
-    if (request.position) {
-      const position = vector(request.position, ['x', 'y', 'z']);
-      if (typeof node.setPosition !== 'function') invalidMutation('node.setPosition is unavailable');
-      node.setPosition(position.x, position.y, position.z);
-    }
-    if (request.rotation) {
-      const rotation = vector(request.rotation, ['x', 'y', 'z', 'w']);
-      if (typeof node.setRotation !== 'function') invalidMutation('node.setRotation is unavailable');
-      node.setRotation(rotation.x, rotation.y, rotation.z, rotation.w);
-    }
-    if (request.scale) {
-      const scale = vector(request.scale, ['x', 'y', 'z']);
-      if (typeof node.setScale !== 'function') invalidMutation('node.setScale is unavailable');
-      node.setScale(scale.x, scale.y, scale.z);
+    let stage = 'position';
+    try {
+      if (position) node.setPosition(position.x, position.y, position.z);
+      stage = 'rotation';
+      if (rotation) node.setRotation(rotation.x, rotation.y, rotation.z, rotation.w);
+      stage = 'scale';
+      if (scale) node.setScale(scale.x, scale.y, scale.z);
+    } catch {
+      // A game setter may mutate before throwing; report the observed state instead of claiming atomicity.
+      const after = state();
+      return { changed: JSON.stringify(before) !== JSON.stringify(after), partial: true, failed: stage, target: { nodeUuid: request.uuid }, before, after, runtimeOnly: true };
     }
     const after = state();
     return { changed: JSON.stringify(before) !== JSON.stringify(after), target: { nodeUuid: request.uuid }, before, after, runtimeOnly: true };
@@ -1540,14 +1543,16 @@ export function inspectCocos(request: BridgeRequest): unknown {
       if (keys.length === 1 && typeof value.$node === 'string') return findByUuid(value.$node);
       if (keys.length === 1 && typeof value.$path === 'string') {
         const found: any[] = [];
-        walk((candidate, path) => { if (path === value.$path) found.push(candidate); return found.length > 1 ? false : undefined; });
-        if (found.length !== 1) invalidMutation(found.length ? `path ${value.$path} matches several nodes` : `no node at ${value.$path}`);
+        const traversal = walk((candidate, path) => { if (path === value.$path) found.push(candidate); return found.length > 1 ? false : undefined; });
+        if (found.length > 1) invalidMutation(`path ${value.$path} matches several nodes`);
+        if (traversal.truncated) invalidMutation('path lookup exceeded traversal limit');
+        if (!found.length) invalidMutation(`no node at ${value.$path}`);
         return found[0];
       }
       if (keys.length === 1 && typeof value.$component === 'string') {
         let found: any;
-        walk(candidate => { found = components(candidate).find(component => component?.uuid === value.$component); return found ? false : undefined; });
-        if (!found) throw new Error('Component not found');
+        const traversal = walk(candidate => { found = components(candidate).find(component => component?.uuid === value.$component); return found ? false : undefined; });
+        if (!found) throw new Error(traversal.truncated ? 'Component not found within traversal limit' : 'Component not found');
         return found;
       }
       if (keys.length === 1 && typeof value.$asset === 'string') {
@@ -1561,17 +1566,25 @@ export function inspectCocos(request: BridgeRequest): unknown {
     const serializer = createSerializer(Math.min(Math.max(request.maxDepth ?? 2, 0), 6));
     const describe = (value: unknown) => value === undefined ? { type: 'undefined' } : { value: serializer.serialize(value, 0) ?? null };
     const report = (outcome: Record<string, unknown>) => ({ called: true, target: { nodeUuid: request.uuid, ...(request.componentUuid ? { componentUuid: request.componentUuid } : {}) }, method: name, ...outcome, serialization: serializer.stats(), runtimeOnly: true });
+    // Error messages are untrusted game text and may contain arbitrary credentials.
+    const thrown = () => ({ name: 'Error', message: '[redacted]' });
     let result: any;
     try {
       result = descriptor.value.apply(target, args);
-    } catch (error) {
-      return report({ threw: { name: String((error as Error)?.name ?? 'Error').slice(0, 200), message: String((error as Error)?.message ?? error).slice(0, 2_000) } });
+    } catch {
+      return report({ threw: thrown() });
     }
-    if (!result || typeof result.then !== 'function' || !request.awaitMs) return report({ result: describe(result), ...(result && typeof result.then === 'function' ? { pending: true } : {}) });
+    if (!result || typeof result.then !== 'function') return report({ result: describe(result) });
+    const promise = Promise.resolve(result);
+    if (!request.awaitMs) {
+      void promise.catch(() => {});
+      return report({ pending: true });
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
     return Promise.race([
-      Promise.resolve(result).then(value => report({ result: describe(value), awaited: true }), error => report({ awaited: true, threw: { name: String(error?.name ?? 'Error').slice(0, 200), message: String(error?.message ?? error).slice(0, 2_000) } })),
-      new Promise(resolve => setTimeout(() => resolve(report({ pending: true, timedOut: true })), request.awaitMs)),
-    ]);
+      promise.then(value => report({ result: describe(value), awaited: true }), () => report({ awaited: true, threw: thrown() })),
+      new Promise(resolve => { timer = setTimeout(() => resolve(report({ pending: true, timedOut: true })), request.awaitMs); }),
+    ]).finally(() => clearTimeout(timer));
   }
 
   // CCObject._objFlags bit 0 is Destroyed (isValid reads it). A node outside the scene is only detached: pooled nodes are, legitimately.
