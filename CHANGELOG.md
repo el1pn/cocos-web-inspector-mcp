@@ -6,6 +6,7 @@ All notable changes are documented here.
 
 ### Added
 
+- `cocos_run_steps` runs a short flow (click, type, key, wait until a node exists, is gone, active, or hidden, wait_property, sleep) in one call, stops at the first failure, and skips optional popups with `ifPresent`. It removes one agent round trip per action. Registered only with `--allow-runtime-mutation`; works on web and native.
 - `--allow-recording` registers `cocos_start_recording` and `cocos_stop_recording`. Web recordings use Chromium screencast frames and `ffmpeg`; native Android recordings use `adb screenrecord`. Both return a local MP4 path under a server-controlled directory.
 - `--log-file <path>` appends one JSON line per tool call (time, tool, masked arguments, duration, ok, error, response bytes) for debugging. Results are never logged.
 - `launch --always-on-top` (macOS) pins the Chrome windows above other apps through yabai. It fails fast when yabai is missing or the platform is not macOS.

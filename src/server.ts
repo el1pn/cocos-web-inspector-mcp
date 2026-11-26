@@ -291,6 +291,32 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     annotations: readOnly,
   }, input => executeNode(input, uuid => ({ action: 'getProperties', uuid, componentType: input.componentType, componentUuid: input.componentUuid, maxDepth: input.maxDepth })));
 
+  type WaitInput = Target & { componentType?: string | undefined; componentUuid?: string | undefined; key: string; equals: boolean | number | string | null; timeoutMs?: number | undefined; intervalMs?: number | undefined };
+  const waitProperty = async (page: Page, input: WaitInput) => {
+    const deadline = Date.now() + (input.timeoutMs ?? 5_000);
+    let polls = 0;
+    let value: unknown;
+    let gone: string | undefined;
+    // A path is resolved on every poll so a scene switch or a node still being created does not end the wait early.
+    for (let uuid = input.uuid;;) {
+      polls++;
+      try {
+        uuid ??= await resolveUuid(page, input);
+        value = ((await runBridge(page, { action: 'getProperties', uuid, componentType: input.componentType, componentUuid: input.componentUuid, maxDepth: 0 })) as { properties?: Record<string, unknown> }).properties?.[input.key];
+        gone = undefined;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (!/Node not found|Active Cocos scene not found|Component not found/.test(message)) throw error;
+        gone = message.replace(/^page\.evaluate: (?:Error: )?/, '').split('\n')[0]!;
+        value = undefined;
+        if (!input.uuid) uuid = undefined;
+      }
+      if (gone === undefined && looseEquals(value, input.equals) || Date.now() >= deadline) break;
+      await new Promise(resolve => setTimeout(resolve, input.intervalMs ?? 200));
+    }
+    return { matched: gone === undefined && looseEquals(value, input.equals), key: input.key, value: value ?? null, polls, ...(gone ? { gone } : {}) };
+  };
+
   server.registerTool('cocos_wait_for_property', {
     description: 'Poll one top-level property of a Cocos node or component until it equals a value or the timeout passes. Booleans, numbers, and strings of different types match by string form ("true" matches true, "8000" matches 8000).',
     inputSchema: obj({ pageUrl, ...target, componentType: blank(z.string().min(1)), componentUuid: blank(z.string().min(1)), key: z.string().min(1).max(200), equals: z.union([z.boolean(), finiteNumber, z.string().max(2_000), z.null()]), timeoutMs: z.number().int().min(100).max(30_000, 'timeoutMs max is 30000').optional(), intervalMs: z.number().int().min(50).max(5_000, 'intervalMs max is 5000').optional() }).refine(oneTarget, oneTargetMessage)
@@ -298,29 +324,7 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     annotations: readOnly,
   }, async input => {
     try {
-      const page = await browser.page(input.pageUrl);
-      const deadline = Date.now() + (input.timeoutMs ?? 5_000);
-      let polls = 0;
-      let value: unknown;
-      let gone: string | undefined;
-      // A path is resolved on every poll so a scene switch or a node still being created does not end the wait early.
-      for (let uuid = input.uuid;;) {
-        polls++;
-        try {
-          uuid ??= await resolveUuid(page, input);
-          value = ((await runBridge(page, { action: 'getProperties', uuid, componentType: input.componentType, componentUuid: input.componentUuid, maxDepth: 0 })) as { properties?: Record<string, unknown> }).properties?.[input.key];
-          gone = undefined;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : '';
-          if (!/Node not found|Active Cocos scene not found|Component not found/.test(message)) throw error;
-          gone = message.replace(/^page\.evaluate: (?:Error: )?/, '').split('\n')[0]!;
-          value = undefined;
-          if (!input.uuid) uuid = undefined;
-        }
-        if (gone === undefined && looseEquals(value, input.equals) || Date.now() >= deadline) break;
-        await new Promise(resolve => setTimeout(resolve, input.intervalMs ?? 200));
-      }
-      return response({ matched: gone === undefined && looseEquals(value, input.equals), key: input.key, value: value ?? null, polls, ...(gone ? { gone } : {}) });
+      return response(await waitProperty(await browser.page(input.pageUrl), input));
     } catch (error) {
       return failure(error);
     }
@@ -375,6 +379,83 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     }, async input => {
       try {
         return response(await (web ? pressKey : nativePressKey)(await browser.page(input.pageUrl), input.key));
+      } catch (error) {
+        return failure(error);
+      }
+    });
+
+    // One call per flow: every LLM round trip between steps is slower than the step itself.
+    const stepTimeout = z.number().int().min(100).max(30_000).optional();
+    const stepTarget = { ...target };
+    const stepSchema = z.discriminatedUnion('do', [
+      obj({ do: z.literal('click'), ...stepTarget, ifPresent: z.boolean().optional() }).refine(oneTarget, oneTargetMessage),
+      obj({ do: z.literal('type'), ...stepTarget, text: z.string().max(2_000), submit: z.boolean().optional() }).refine(oneTarget, oneTargetMessage),
+      obj({ do: z.literal('key'), key: z.string().regex(keyPattern, 'Use Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, or one letter or digit') }),
+      obj({ do: z.literal('wait'), ...stepTarget, until: z.enum(['exists', 'gone', 'active', 'hidden']), timeoutMs: stepTimeout, intervalMs: z.number().int().min(50).max(2_000).optional(), ifPresent: z.boolean().optional() }).refine(oneTarget, oneTargetMessage),
+      obj({ do: z.literal('wait_property'), ...stepTarget, componentType: blank(z.string().min(1)), key: z.string().min(1).max(200), equals: z.union([z.boolean(), finiteNumber, z.string().max(2_000), z.null()]), timeoutMs: stepTimeout, intervalMs: z.number().int().min(50).max(2_000).optional() }).refine(oneTarget, oneTargetMessage),
+      obj({ do: z.literal('sleep'), ms: z.number().int().min(1).max(2_000) }),
+    ]);
+    type Step = z.infer<typeof stepSchema>;
+    const runStep = async (page: Page, step: Step, deadline: number): Promise<{ ok: boolean; skipped?: true; reason?: string; detail?: unknown }> => {
+      if (step.do === 'sleep') { await new Promise(resolve => setTimeout(resolve, Math.min(step.ms, Math.max(deadline - Date.now(), 0)))); return { ok: true }; }
+      if (step.do === 'key') return { ok: true, detail: await (web ? pressKey : nativePressKey)(page, step.key) };
+      if (step.do === 'wait_property') {
+        const result = await waitProperty(page, { ...step, timeoutMs: Math.min(step.timeoutMs ?? 5_000, Math.max(deadline - Date.now(), 100)) });
+        return result.matched ? { ok: true } : { ok: false, reason: `Property ${step.key} is ${JSON.stringify(result.value)}${'gone' in result ? ` (${result.gone})` : ''}, not ${JSON.stringify(step.equals)}` };
+      }
+      if (step.do === 'wait') {
+        const stop = Math.min(Date.now() + (step.timeoutMs ?? 5_000), deadline);
+        const find = { action: 'findNode', ...(step.uuid ? { uuid: step.uuid } : { path: step.path }), limit: 10 } as const;
+        let last = 'not checked';
+        for (;;) {
+          const matches = ((await runBridge(page, find)) as { matches?: Array<{ activeInHierarchy: boolean }> }).matches ?? [];
+          const done = step.until === 'exists' ? matches.length > 0 : step.until === 'gone' ? matches.length === 0
+            : step.until === 'active' ? matches.some(match => match.activeInHierarchy) : matches.every(match => !match.activeInHierarchy);
+          if (done) return { ok: true };
+          last = `${matches.length} matching node(s)`;
+          if (Date.now() >= stop) break;
+          await new Promise(resolve => setTimeout(resolve, step.intervalMs ?? 100));
+        }
+        // Closing a popup often destroys its node instead of deactivating it, so 'hidden' accepts both.
+        // ifPresent on a wait means the node may never show up (an optional popup): move on instead of failing the flow.
+        return step.ifPresent && step.until !== 'gone' ? { ok: true, skipped: true, reason: `Not ${step.until}: ${last}` } : { ok: false, reason: `Timed out waiting until ${step.until}: ${last}` };
+      }
+      let uuid: string;
+      try {
+        uuid = await resolveUuid(page, step);
+      } catch (error) {
+        if (step.do === 'click' && step.ifPresent && error instanceof Error && error.message.startsWith('Node not found')) return { ok: true, skipped: true, reason: 'Node not found' };
+        throw error;
+      }
+      if (step.do === 'type') return { ok: true, detail: await (web ? typeText : nativeTypeText)(page, uuid, step.text, step.submit ?? false) };
+      const clicked = await (web ? clickNode : nativeClick)(page, uuid) as { clicked: boolean; reason?: string };
+      if (clicked.clicked) return { ok: true };
+      return step.ifPresent ? { ok: true, skipped: true, reason: clicked.reason ?? 'Not clickable' } : { ok: false, reason: clicked.reason ?? 'Not clickable' };
+    };
+    server.registerTool('cocos_run_steps', {
+      description: 'Run a short flow in one call instead of one tool call per action: steps click, type, key, wait (until a node exists, is gone, is active, or is hidden: gone or inactive, which is how a closed popup usually looks), wait_property, and sleep run in order, stopping at the first failure. Use ifPresent on click or wait for optional popups. Each node is looked up again at its step, so scene changes mid-flow are fine. Returns per-step results; handlers may call game servers.',
+      inputSchema: obj({ pageUrl, steps: z.array(stepSchema).min(1).max(20), totalTimeoutMs: z.number().int().min(1_000).max(120_000).optional() }),
+      annotations: realInput,
+    }, async input => {
+      try {
+        const page = await browser.page(input.pageUrl);
+        const deadline = Date.now() + (input.totalTimeoutMs ?? 60_000);
+        const results: Array<Record<string, unknown>> = [];
+        let failedAt: number | undefined;
+        for (const [i, step] of input.steps.entries()) {
+          const started = Date.now();
+          const label = step.do === 'sleep' || step.do === 'key' ? {} : { target: step.uuid ?? step.path };
+          if (started >= deadline) { results.push({ i, do: step.do, ...label, ok: false, ms: 0, reason: 'totalTimeoutMs exceeded' }); failedAt = i; break; }
+          try {
+            const { detail, ...result } = await runStep(page, step, deadline);
+            results.push({ i, do: step.do, ...label, ...result, ms: Date.now() - started });
+          } catch (error) {
+            const failed = failure(error).structuredContent as { code: string; message: string };
+            results.push({ i, do: step.do, ...label, ok: false, ms: Date.now() - started, reason: `${failed.code}: ${failed.message}` });
+          }
+          if (results[i]!.ok === false) { failedAt = i; break; }
+        }
+        return response({ completed: failedAt === undefined, ...(failedAt === undefined ? {} : { failedAt }), steps: results, notRun: input.steps.length - results.length });
       } catch (error) {
         return failure(error);
       }

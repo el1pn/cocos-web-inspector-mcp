@@ -1591,3 +1591,67 @@ test('--log-file appends one masked JSON line per tool call, with outcome and no
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('MCP cocos_run_steps runs a flow, skips optional nodes, and stops at the first failure', async () => {
+  const log: string[] = [];
+  let popupChecks = 0;
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    mouse: { move: async () => {}, down: async () => { log.push('down'); }, up: async () => {} },
+    evaluate: async (_fn: unknown, request: any) => {
+      if (!request) return 0; // navigator.maxTouchPoints
+      if (request.action === 'findNode') {
+        if (request.path === '/Canvas/Popup') return { matches: ++popupChecks < 3 ? [] : [{ uuid: 'popup', activeInHierarchy: true }] };
+        if (request.path === '/Canvas/Close' || request.path === '/Canvas/Play') return { matches: [{ uuid: request.path, activeInHierarchy: true }] };
+        return { matches: [] };
+      }
+      if (request.action === 'nodeInputPoint') return { x: 10, y: 20 };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowRuntimeMutation: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const run = async (arguments_: Record<string, unknown>) => client.callTool({ name: 'cocos_run_steps', arguments: arguments_ }) as Promise<any>;
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const ok = (await run({ steps: [
+      { do: 'wait', path: '/Canvas/Popup', until: 'exists', intervalMs: 50, timeoutMs: 2_000 },
+      { do: 'click', path: '/Canvas/Missing', ifPresent: true },
+      { do: 'click', path: '/Canvas/Close' },
+      { do: 'wait', path: '/Canvas/Missing', until: 'exists', timeoutMs: 100, intervalMs: 50, ifPresent: true },
+      { do: 'sleep', ms: 1 },
+      { do: 'click', path: '/Canvas/Play' },
+    ] })).structuredContent;
+    assert.equal(ok.completed, true);
+    assert.deepEqual(ok.steps.map((step: any) => [step.ok, step.skipped ?? false]), [[true, false], [true, true], [true, false], [true, true], [true, false], [true, false]]);
+    assert.equal(log.length, 2, 'only the two real clicks reached the pointer');
+    const failed = (await run({ steps: [{ do: 'click', path: '/Canvas/Missing' }, { do: 'click', path: '/Canvas/Play' }] })).structuredContent;
+    assert.equal(failed.completed, false);
+    assert.equal(failed.failedAt, 0);
+    assert.equal(failed.notRun, 1);
+    assert.match(failed.steps[0].reason, /NODE_NOT_FOUND/);
+    assert.equal(log.length, 2, 'no step runs after a failure');
+    const timedOut = (await run({ steps: [{ do: 'wait', path: '/Canvas/Missing', until: 'exists', timeoutMs: 100, intervalMs: 50 }] })).structuredContent;
+    assert.match(timedOut.steps[0].reason, /Timed out waiting until exists/);
+    for (const arguments_ of [{ steps: [] }, { steps: Array.from({ length: 21 }, () => ({ do: 'sleep', ms: 1 })) }, { steps: [{ do: 'click' }] }, { steps: [{ do: 'click', uuid: 'a', path: '/b' }] }, { steps: [{ do: 'sleep', ms: 5_000 }] }, { steps: [{ do: 'eval', code: '1' }] }, { steps: [{ do: 'sleep', ms: 1, extra: 1 }] }, { steps: [{ do: 'key', key: 'F13' }] }]) {
+      assert.equal((await run(arguments_)).isError, true, JSON.stringify(arguments_));
+    }
+    const tool = (await client.listTools()).tools.find(candidate => candidate.name === 'cocos_run_steps');
+    assert.deepEqual(tool?.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
+test('cocos_run_steps is registered only with runtime mutation', async () => {
+  const server = createServer({ page: async () => ({}), close: async () => {} } as any);
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    assert.equal((await client.listTools()).tools.some(tool => tool.name === 'cocos_run_steps'), false);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
