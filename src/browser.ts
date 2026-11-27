@@ -18,6 +18,7 @@ export type InspectorErrorCode =
   | 'INVALID_MUTATION'
   | 'OUTPUT_TRUNCATED'
   | 'REQUEST_NOT_FOUND'
+  | 'BROWSER_DATA_DISABLED'
   | 'EVALUATE_TIMEOUT';
 
 export class InspectorError extends Error {

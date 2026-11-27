@@ -3,7 +3,7 @@ import { InspectorError } from './browser.js';
 
 export type BridgeRequest =
   | { action: 'sceneTree'; maxDepth?: number | undefined; maxNodes?: number | undefined }
-  | { action: 'findNode'; uuid?: string | undefined; name?: string | undefined; path?: string | undefined; nameContains?: string | undefined; componentType?: string | undefined; active?: boolean | undefined; pathPrefix?: string | undefined; limit?: number | undefined }
+  | { action: 'findNode'; uuid?: string | undefined; name?: string | undefined; path?: string | undefined; nameContains?: string | undefined; componentType?: string | undefined; active?: boolean | undefined; pathPrefix?: string | undefined; text?: string | undefined; textContains?: string | undefined; limit?: number | undefined }
   | { action: 'getNode'; uuid: string }
   | { action: 'getNodeBounds'; uuid: string }
   | { action: 'nodeInputPoint'; uuid: string }
@@ -778,8 +778,19 @@ export function inspectCocos(request: BridgeRequest): unknown {
   }
 
   if (request.action === 'findNode') {
-    if (![request.uuid, request.name, request.path, request.nameContains, request.componentType, request.active, request.pathPrefix].some(value => value !== undefined)) throw new Error('At least one node filter is required');
+    if (![request.uuid, request.name, request.path, request.nameContains, request.componentType, request.active, request.pathPrefix, request.text, request.textContains].some(value => value !== undefined)) throw new Error('At least one node filter is required');
     const limit = Math.min(Math.max(request.limit ?? 20, 1), 100);
+    // Visible text lives in the _string data field of Label and RichText; read it without invoking the string getter. Whitespace at the ends is layout noise, so compare trimmed.
+    const nodeText = (node: any): string | undefined => {
+      for (const component of components(node)) {
+        const name = componentName(component);
+        if (name !== 'Label' && name !== 'RichText') continue;
+        const value = dataProperty(component, '_string');
+        if (typeof value === 'string') return value.trim().slice(0, 2_000);
+      }
+      return undefined;
+    };
+    const wantsText = request.text !== undefined || request.textContains !== undefined;
     const matches: unknown[] = [];
     let more = false;
     const traversal = walk((node, path) => {
@@ -789,9 +800,10 @@ export function inspectCocos(request: BridgeRequest): unknown {
         && (request.nameContains === undefined || String(node?.name ?? '').includes(request.nameContains))
         && (request.componentType === undefined || components(node).some(component => componentName(component) === request.componentType))
         && (request.active === undefined || (node?.active !== false) === request.active)
-        && (request.pathPrefix === undefined || path.startsWith(request.pathPrefix));
+        && (request.pathPrefix === undefined || path.startsWith(request.pathPrefix))
+        && (!wantsText || (request.text === undefined || nodeText(node) === request.text.trim()) && (request.textContains === undefined || (nodeText(node) ?? '').includes(request.textContains)));
       if (matched) {
-        if (matches.length < limit) matches.push({ ...summary(node), path });
+        if (matches.length < limit) matches.push({ ...summary(node), path, ...(wantsText ? { text: nodeText(node) } : {}) });
         else {
           more = true;
           return false;

@@ -729,6 +729,61 @@ test('property serializer exposes allowlisted display fields without getters', (
   assert.equal(read('component-stats').string, undefined);
 }));
 
+test('findNode matches the visible text of Label and RichText without running getters', () => withFakeCocos(() => {
+  const cc = (globalThis as any).cc;
+  class Label { uuid = 'component-label'; node = {}; _string = '  Play now '; }
+  Object.defineProperty(Label.prototype, 'string', { get: () => { throw new Error('getter ran'); } });
+  Object.assign(cc, { Label });
+  cc.director.getScene().children[0].components.push(new Label());
+  const find = (filter: Record<string, unknown>) => (inspectCocos({ action: 'findNode', ...filter }) as any).matches;
+  assert.deepEqual(find({ text: 'Play now' }).map((match: any) => [match.uuid, match.text]), [['child-1', 'Play now']]);
+  assert.equal(find({ text: 'Play' }).length, 0, 'text is exact');
+  assert.equal(find({ textContains: 'ay no' }).length, 1);
+  assert.equal(find({ textContains: 'nope' }).length, 0);
+  assert.equal(find({ text: 'Play now', componentType: 'StatsComponent' }).length, 1);
+  assert.equal(find({ name: 'Player' })[0].text, undefined, 'text only appears when asked for');
+}));
+
+test('MCP click by text resolves the one visible node and refuses duplicates', async () => {
+  const clicks: string[] = [];
+  const shown = (uuid: string, activeInHierarchy = true) => ({ uuid, path: `/${uuid}`, activeInHierarchy });
+  let matches: any[] = [];
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    mouse: { move: async () => {}, down: async () => { clicks.push('down'); }, up: async () => {} },
+    evaluate: async (_fn: unknown, request: any) => {
+      if (!request) return 0;
+      if (request.action === 'findNode') { assert.equal(request.text, 'Play'); return { matches }; }
+      if (request.action === 'nodeInputPoint') return { x: 1, y: 1 };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowRuntimeMutation: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const run = async (step: unknown) => (await client.callTool({ name: 'cocos_run_steps', arguments: { steps: [step] } }) as any);
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    matches = [shown('closed-popup', false), shown('btn')];
+    assert.equal((await run({ do: 'click', text: 'Play' })).structuredContent.completed, true);
+    assert.equal(clicks.length, 1, 'the hidden duplicate is ignored');
+    matches = [shown('a'), shown('b')];
+    const ambiguous = await run({ do: 'click', text: 'Play' });
+    assert.equal(ambiguous.structuredContent.steps[0].ok, false);
+    assert.match(ambiguous.structuredContent.steps[0].reason, /AMBIGUOUS_NODE: Text "Play" shows on 2 nodes/);
+    assert.equal(clicks.length, 1, 'an ambiguous text never clicks');
+    matches = [];
+    assert.match((await run({ do: 'click', text: 'Play' })).structuredContent.steps[0].reason, /NODE_NOT_FOUND: Node not found with text "Play"/);
+    assert.equal((await run({ do: 'click', text: 'Play', ifPresent: true })).structuredContent.steps[0].skipped, true);
+    for (const step of [{ do: 'click' }, { do: 'click', text: 'Play', path: '/a' }, { do: 'click', text: '' }]) {
+      const result = await run(step);
+      assert.equal(result.isError || result.structuredContent.completed === false, true, JSON.stringify(step));
+    }
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
 test('browser connection retries IPv6 loopback and hints at port collisions', async () => {
   const ipv6 = fakeBrowser();
   const tried: string[] = [];
@@ -1686,6 +1741,113 @@ test('MCP read step and notEquals/matches wait for a turn-based game state', asy
     }
   } finally {
     await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
+test('MCP run_steps assert, repeat, set_property, drag, and screenshot steps', async () => {
+  let spins = 0;
+  const sets: unknown[] = [];
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    mouse: { move: async () => {}, down: async () => {}, up: async () => {} },
+    screenshot: async () => Buffer.from('png'),
+    evaluate: async (_fn: unknown, request: any) => {
+      if (!request) return 0;
+      if (request.action === 'findNode') return { matches: [{ uuid: request.path, activeInHierarchy: true }] };
+      if (request.action === 'nodeInputPoint') return { x: 10, y: 20 };
+      if (request.action === 'getProperties') return { properties: { string: request.uuid === '/Bet' ? String(spins) : 'Score 42' } };
+      if (request.action === 'setProperty') { sets.push(request); return { updated: true }; }
+      if (request.action === 'getNodeBounds') return { available: true, visible: true, clippedViewport: { x: 0, y: 0, width: 10, height: 10 } };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowRuntimeMutation: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const run = async (steps: unknown[]) => (await client.callTool({ name: 'cocos_run_steps', arguments: { steps } }) as any);
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const asserted = (await run([{ do: 'assert', path: '/Score', key: 'string', matches: '^Score' }, { do: 'assert', path: '/Score', key: 'string', equals: 'Score 99' }, { do: 'sleep', ms: 1 }])).structuredContent;
+    assert.equal(asserted.failedAt, 1);
+    assert.equal(asserted.notRun, 1);
+    assert.match(asserted.steps[1].reason, /Assert failed: string is "Score 42", expected "Score 99"/);
+    assert.equal(asserted.steps[0].value, 'Score 42');
+    const fixed = (await run([{ do: 'repeat', times: 3, steps: [{ do: 'set_property', path: '/Bet', componentUuid: 'c', key: 'string', value: '1' }] }])).structuredContent;
+    assert.equal(fixed.completed, true);
+    assert.equal(fixed.steps[0].value.iterations, 3);
+    assert.equal(sets.length, 3);
+    spins = 5;
+    const reached = (await run([{ do: 'repeat', times: 5, until: { path: '/Bet', key: 'string', equals: 5 }, steps: [{ do: 'sleep', ms: 1 }] }])).structuredContent;
+    assert.equal(reached.steps[0].value.iterations, 0, 'until already true: no iterations');
+    spins = 0;
+    const missed = (await run([{ do: 'repeat', times: 2, until: { path: '/Bet', key: 'string', equals: 5 }, steps: [{ do: 'sleep', ms: 1 }] }])).structuredContent;
+    assert.equal(missed.completed, false);
+    assert.match(missed.steps[0].reason, /did not reach the expected value within 2 iterations/);
+    const inner = (await run([{ do: 'repeat', times: 2, steps: [{ do: 'assert', path: '/Score', key: 'string', equals: 'nope' }] }])).structuredContent;
+    assert.match(inner.steps[0].reason, /repeat 1\/2 step 0 \(assert\): Assert failed/);
+    const dragged = (await run([{ do: 'drag', path: '/List', dx: 0, dy: -50 }, { do: 'screenshot', path: '/List' }])).structuredContent;
+    assert.equal(dragged.completed, true, JSON.stringify(dragged));
+    for (const step of [{ do: 'repeat', times: 21, steps: [{ do: 'sleep', ms: 1 }] }, { do: 'repeat', times: 1, steps: [] }, { do: 'repeat', times: 1, steps: [{ do: 'repeat', times: 1, steps: [{ do: 'sleep', ms: 1 }] }] }, { do: 'repeat', times: 1, steps: [{ do: 'screenshot', path: '/a' }] }, { do: 'assert', path: '/a', key: 'k' }, { do: 'drag', path: '/a', dx: 0, dy: 0 }]) {
+      assert.equal((await run([step])).isError, true, JSON.stringify(step));
+    }
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
+test('MCP run_steps wait_network ignores earlier requests, matches method and status, and needs browser data', async () => {
+  const make = (url: string, method: string, status: number | null, failure?: string) => ({
+    url: () => url, method: () => method, resourceType: () => 'xhr',
+    response: async () => status === null ? null : { status: () => status },
+    failure: () => failure ? { errorText: failure } : null,
+    timing: () => ({ responseEnd: 12 }),
+  });
+  const requests: any[] = [make('http://localhost/api/login', 'POST', 200)];
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    requests: async () => requests,
+    mouse: { move: async () => {}, down: async () => { requests.push(make('http://localhost/api/login', 'POST', 500), make('http://localhost/api/play?token=abc', 'GET', 200)); }, up: async () => {} },
+    evaluate: async (_fn: unknown, request: any) => {
+      if (!request) return 0;
+      if (request.action === 'findNode') return { matches: [{ uuid: 'btn', activeInHierarchy: true }] };
+      if (request.action === 'nodeInputPoint') return { x: 1, y: 1 };
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const connect = async (flags: Record<string, boolean>) => {
+    const server = createServer({ page: async () => page, close: async () => {} } as any, { allowRuntimeMutation: true, ...flags });
+    const client = new Client({ name: 'self-test', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return { server, client, run: async (steps: unknown[]) => client.callTool({ name: 'cocos_run_steps', arguments: { steps } }) as Promise<any> };
+  };
+  const { server, client, run } = await connect({ allowBrowserData: true });
+  try {
+    const stale = (await run([{ do: 'wait_network', urlContains: '/api/login', timeoutMs: 150, intervalMs: 50 }])).structuredContent;
+    assert.equal(stale.completed, false, 'the request made before the flow never counts');
+    assert.match(stale.steps[0].reason, /No request containing "\/api\/login" completed/);
+    const flow = (await run([
+      { do: 'click', path: '/Login' },
+      { do: 'wait_network', urlContains: '/api/play', method: 'GET', status: 200, timeoutMs: 1_000, intervalMs: 50 },
+    ])).structuredContent;
+    assert.equal(flow.completed, true, JSON.stringify(flow));
+    assert.equal(flow.steps[1].value.status, 200);
+    assert.doesNotMatch(JSON.stringify(flow), /token=abc/, 'secret query values stay masked');
+    requests.push(make('http://localhost/api/buy', 'POST', 403), make('http://localhost/api/buy', 'POST', null, 'net::ERR_FAILED'));
+    const wrong = (await run([{ do: 'click', path: '/Login' }, { do: 'wait_network', urlContains: '/api/login', status: 200, timeoutMs: 500, intervalMs: 50 }])).structuredContent;
+    assert.match(wrong.steps[1].reason, /returned 500, expected 200/);
+    const inRepeat = await run([{ do: 'repeat', times: 1, steps: [{ do: 'wait_network', urlContains: 'x' }] }]);
+    assert.equal(inRepeat.isError, true, 'wait_network is top level only');
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+  const off = await connect({});
+  try {
+    const denied = await off.run([{ do: 'wait_network', urlContains: '/api' }]);
+    assert.equal(denied.isError, true);
+    assert.equal(denied.structuredContent.code, 'BROWSER_DATA_DISABLED');
+  } finally {
+    await Promise.allSettled([off.client.close(), off.server.close()]);
   }
 });
 

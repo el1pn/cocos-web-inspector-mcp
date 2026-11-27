@@ -63,6 +63,15 @@ async function resolveUuid(page: Page, input: Target): Promise<string> {
   return matches[0]!.uuid;
 }
 
+// Find the one active node whose Label or RichText shows exactly this text. Hidden duplicates (a closed popup) are ignored; two visible ones are refused, never guessed.
+async function resolveText(page: Page, text: string): Promise<string> {
+  const found = await runBridge(page, { action: 'findNode', text, limit: 50 }) as { matches?: Array<{ uuid: string; path: string; activeInHierarchy: boolean }>; truncated?: boolean };
+  const shown = (found.matches ?? []).filter(match => match.activeInHierarchy);
+  if (shown.length === 0) throw new Error(`Node not found with text "${text.slice(0, 100)}"`);
+  if (shown.length > 1 || found.truncated) throw new InspectorError('AMBIGUOUS_NODE', `Text "${text.slice(0, 100)}" shows on ${found.truncated ? 'more than 50' : shown.length} nodes; pass one uuid or path: ${shown.slice(0, 10).map(match => `${match.uuid} ${match.path}`).join(', ')}`);
+  return shown[0]!.uuid;
+}
+
 // Agents pass "true" or "8000" for a boolean or number property: compare primitives of different types by their string form.
 const looseEquals = (value: unknown, expected: unknown) => value === expected
   || ['string', 'number', 'boolean'].includes(typeof value) && ['string', 'number', 'boolean'].includes(typeof expected) && String(value) === String(expected);
@@ -258,11 +267,11 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
   }, input => execute({ action: 'sceneTree', maxDepth: input.maxDepth, maxNodes: input.maxNodes }, input.pageUrl));
 
   server.registerTool('cocos_find_node', {
-    description: 'Find Cocos nodes with bounded exact and filter criteria.',
-    inputSchema: obj({ pageUrl, uuid: blank(z.string().min(1).max(200)), name: blank(z.string().min(1).max(500)), path: blank(z.string().min(1).max(10_000)), nameContains: blank(z.string().min(1).max(500)), componentType: blank(z.string().min(1).max(120)), active: z.boolean().optional(), pathPrefix: blank(z.string().min(1).max(10_000)), limit: z.number().int().min(1).max(100).optional() }).strict()
-      .refine(value => [value.uuid, value.name, value.path, value.nameContains, value.componentType, value.active, value.pathPrefix].some(item => item !== undefined), 'Provide at least one filter'),
+    description: 'Find Cocos nodes with bounded exact and filter criteria. text (exact, trimmed) and textContains match the visible string of a Label or RichText, so a button can be found by what it says; matches carry that text.',
+    inputSchema: obj({ pageUrl, uuid: blank(z.string().min(1).max(200)), name: blank(z.string().min(1).max(500)), path: blank(z.string().min(1).max(10_000)), nameContains: blank(z.string().min(1).max(500)), componentType: blank(z.string().min(1).max(120)), active: z.boolean().optional(), pathPrefix: blank(z.string().min(1).max(10_000)), text: blank(z.string().min(1).max(500)), textContains: blank(z.string().min(1).max(500)), limit: z.number().int().min(1).max(100).optional() }).strict()
+      .refine(value => [value.uuid, value.name, value.path, value.nameContains, value.componentType, value.active, value.pathPrefix, value.text, value.textContains].some(item => item !== undefined), 'Provide at least one filter'),
     annotations: readOnly,
-  }, input => execute({ action: 'findNode', uuid: input.uuid, name: input.name, path: input.path, nameContains: input.nameContains, componentType: input.componentType, active: input.active, pathPrefix: input.pathPrefix, limit: input.limit }, input.pageUrl));
+  }, input => execute({ action: 'findNode', uuid: input.uuid, name: input.name, path: input.path, nameContains: input.nameContains, componentType: input.componentType, active: input.active, pathPrefix: input.pathPrefix, text: input.text, textContains: input.textContains, limit: input.limit }, input.pageUrl));
 
   server.registerTool('cocos_get_node', {
     description: 'Return bounded context for one exact Cocos node UUID.',
@@ -406,17 +415,33 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     // One call per flow: every LLM round trip between steps is slower than the step itself.
     const stepTimeout = z.number().int().min(100).max(30_000).optional();
     const stepTarget = { ...target };
-    const stepSchema = z.discriminatedUnion('do', [
-      obj({ do: z.literal('click'), ...stepTarget, ifPresent: z.boolean().optional() }).refine(oneTarget, oneTargetMessage),
+    const simpleSteps = [
+      // click also finds its node by the text it shows, so a flow survives a scene rebuild that renames or moves nodes.
+      obj({ do: z.literal('click'), ...stepTarget, text: blank(z.string().min(1).max(500)), ifPresent: z.boolean().optional() }).refine(value => [value.uuid, value.path, value.text].filter(item => item !== undefined).length === 1, 'Provide exactly one of uuid, path, or text'),
       obj({ do: z.literal('type'), ...stepTarget, text: z.string().max(2_000), submit: z.boolean().optional() }).refine(oneTarget, oneTargetMessage),
       obj({ do: z.literal('key'), key: z.string().regex(keyPattern, 'Use Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, or one letter or digit') }),
       obj({ do: z.literal('wait'), ...stepTarget, until: z.enum(['exists', 'gone', 'active', 'hidden']), timeoutMs: stepTimeout, intervalMs: z.number().int().min(50).max(2_000).optional(), ifPresent: z.boolean().optional() }).refine(oneTarget, oneTargetMessage),
       obj({ do: z.literal('wait_property'), ...stepTarget, componentType: blank(z.string().min(1)), key: z.string().min(1).max(200), ...matchFields, timeoutMs: stepTimeout, intervalMs: z.number().int().min(50).max(2_000).optional() }).refine(oneTarget, oneTargetMessage).refine(oneMatcher, oneMatcherMessage).refine(validRegex, 'matches is not a valid regular expression'),
       obj({ do: z.literal('read'), reads: z.array(obj({ ...stepTarget, componentType: blank(z.string().min(1)), key: z.string().min(1).max(200) }).refine(oneTarget, oneTargetMessage)).min(1).max(10) }),
       obj({ do: z.literal('sleep'), ms: z.number().int().min(1).max(2_000) }),
+      obj({ do: z.literal('assert'), ...stepTarget, componentType: blank(z.string().min(1)), key: z.string().min(1).max(200), ...matchFields }).refine(oneTarget, oneTargetMessage).refine(oneMatcher, oneMatcherMessage).refine(validRegex, 'matches is not a valid regular expression'),
+      obj({ do: z.literal('drag'), ...stepTarget, dx: z.number().min(-4_000).max(4_000), dy: z.number().min(-4_000).max(4_000), steps: z.number().int().min(1).max(60).optional(), durationMs: z.number().int().min(0).max(5_000).optional() }).refine(oneTarget, oneTargetMessage).refine(value => value.dx !== 0 || value.dy !== 0, 'Provide a non-zero dx or dy'),
+      obj({ do: z.literal('set_property'), ...stepTarget, componentUuid: z.string().min(1), key: z.string().min(1).max(200), value: propertyValue }).refine(oneTarget, oneTargetMessage),
+    ] as const;
+    const stepSchema = z.discriminatedUnion('do', [
+      ...simpleSteps,
+      // Images dominate the 200,000-byte response ceiling, so a screenshot is capped small and top level only.
+      obj({ do: z.literal('screenshot'), ...stepTarget, maxBytes: z.number().int().min(1_000).max(50_000).optional() }).refine(oneTarget, oneTargetMessage),
+      // Top level only: the cursor that decides which requests count as new is kept per flow.
+      obj({ do: z.literal('wait_network'), urlContains: z.string().min(1).max(500), method: blank(z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])), status: z.number().int().min(100).max(599).optional(), timeoutMs: stepTimeout, intervalMs: z.number().int().min(50).max(2_000).optional() }),
+      // One level only: no nested repeat, so the work stays bounded by times x steps.
+      obj({ do: z.literal('repeat'), times: z.number().int().min(1).max(20), steps: z.array(z.discriminatedUnion('do', simpleSteps)).min(1).max(10), until: obj({ ...stepTarget, componentType: blank(z.string().min(1)), key: z.string().min(1).max(200), ...matchFields }).refine(oneTarget, oneTargetMessage).refine(oneMatcher, oneMatcherMessage).refine(validRegex, 'matches is not a valid regular expression').optional() }),
     ]);
     type Step = z.infer<typeof stepSchema>;
-    const runStep = async (page: Page, step: Step, deadline: number): Promise<{ ok: boolean; skipped?: true; reason?: string; detail?: unknown }> => {
+    type NetCursor = { after: number };
+    type NetRow = { id: number; method: string; url: string; status: number | null; failure?: string; durationMs?: number };
+    const listRequests = async (page: Page) => ((await (web ? networkRequests : nativeNetworkRequests)(page, { limit: 200 })) as { requests: NetRow[] }).requests;
+    const runStep = async (page: Page, step: Step, deadline: number, net: NetCursor): Promise<{ ok: boolean; skipped?: true; reason?: string; detail?: unknown }> => {
       if (step.do === 'sleep') { await new Promise(resolve => setTimeout(resolve, Math.min(step.ms, Math.max(deadline - Date.now(), 0)))); return { ok: true }; }
       if (step.do === 'key') return { ok: true, detail: await (web ? pressKey : nativePressKey)(page, step.key) };
       if (step.do === 'read') {
@@ -427,6 +452,43 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
           values.push({ target: item.uuid ?? item.path, key: item.key, value: read.value ?? null, ...(read.gone ? { gone: read.gone } : {}) });
         }
         return { ok: true, detail: values };
+      }
+      if (step.do === 'repeat') {
+        const until = step.until;
+        const met = async () => { if (!until) return false; const read = await readProp(page, until); return read.gone === undefined && matchValue(read.value, until); };
+        let done = 0;
+        while (done < step.times && !await met()) {
+          for (const [j, sub] of step.steps.entries()) {
+            if (Date.now() >= deadline) return { ok: false, reason: `totalTimeoutMs exceeded in repeat ${done + 1}, step ${j}` };
+            const result = await runStep(page, sub, deadline, net);
+            if (!result.ok) return { ok: false, reason: `repeat ${done + 1}/${step.times} step ${j} (${sub.do}): ${result.reason}` };
+          }
+          done++;
+        }
+        // With until, running out of iterations without reaching it is a failure; without until, times is the goal.
+        if (until && done >= step.times && !await met()) return { ok: false, reason: `repeat: ${until.key} did not reach the expected value within ${step.times} iterations` };
+        return { ok: true, detail: { iterations: done } };
+      }
+      if (step.do === 'wait_network') {
+        // Requests seen before the flow started, or already matched by an earlier wait_network, never count: a click's request fires before this step begins.
+        const stop = Math.min(Date.now() + (step.timeoutMs ?? 5_000), deadline);
+        for (;;) {
+          const hit = (await listRequests(page)).find(row => row.id > net.after && row.url.includes(step.urlContains) && (!step.method || row.method.toUpperCase() === step.method) && (row.status !== null || row.failure));
+          if (hit) {
+            net.after = hit.id;
+            const summary = { id: hit.id, method: hit.method, url: hit.url, status: hit.status, ...(hit.durationMs === undefined ? {} : { durationMs: hit.durationMs }) };
+            if (hit.failure) return { ok: false, reason: `Request ${hit.id} ${hit.method} ${hit.url} failed: ${hit.failure}` };
+            if (step.status !== undefined && hit.status !== step.status) return { ok: false, reason: `Request ${hit.id} ${hit.method} ${hit.url} returned ${hit.status}, expected ${step.status}` };
+            return { ok: true, detail: summary };
+          }
+          if (Date.now() >= stop) return { ok: false, reason: `No ${step.method ? `${step.method} ` : ''}request containing "${step.urlContains}" completed within the timeout` };
+          await new Promise(resolve => setTimeout(resolve, step.intervalMs ?? 100));
+        }
+      }
+      if (step.do === 'assert') {
+        const read = await readProp(page, step);
+        const want = step.notEquals !== undefined ? `not ${JSON.stringify(step.notEquals)}` : step.matches !== undefined ? `matching /${step.matches}/` : JSON.stringify(step.equals);
+        return read.gone === undefined && matchValue(read.value, step) ? { ok: true, detail: read.value ?? null } : { ok: false, reason: `Assert failed: ${step.key} is ${JSON.stringify(read.value ?? null)}${read.gone ? ` (${read.gone})` : ''}, expected ${want}` };
       }
       if (step.do === 'wait_property') {
         const result = await waitProperty(page, { ...step, timeoutMs: Math.min(step.timeoutMs ?? 5_000, Math.max(deadline - Date.now(), 100)) });
@@ -452,10 +514,16 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       }
       let uuid: string;
       try {
-        uuid = await resolveUuid(page, step);
+        uuid = step.do === 'click' && step.text !== undefined ? await resolveText(page, step.text) : await resolveUuid(page, step as Target);
       } catch (error) {
         if (step.do === 'click' && step.ifPresent && error instanceof Error && error.message.startsWith('Node not found')) return { ok: true, skipped: true, reason: 'Node not found' };
         throw error;
+      }
+      if (step.do === 'drag') return { ok: true, detail: await (web ? dragNode(page, uuid, step.dx, step.dy, step.steps, step.durationMs) : nativeDrag(page, uuid, step.dx, step.dy, step.durationMs)) };
+      if (step.do === 'set_property') return { ok: true, detail: await runBridge(page, { action: 'setProperty', uuid, componentUuid: step.componentUuid, key: step.key, value: step.value }) };
+      if (step.do === 'screenshot') {
+        const shot = await (web ? captureNode : nativeCaptureNode)(page, uuid, step.maxBytes ?? 50_000) as { captured?: boolean; reason?: string };
+        return shot.captured ? { ok: true, detail: shot } : { ok: false, reason: `Screenshot failed: ${shot.reason ?? 'not captured'}` };
       }
       if (step.do === 'type') return { ok: true, detail: await (web ? typeText : nativeTypeText)(page, uuid, step.text, step.submit ?? false) };
       const clicked = await (web ? clickNode : nativeClick)(page, uuid) as { clicked: boolean; reason?: string };
@@ -463,29 +531,38 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       return step.ifPresent ? { ok: true, skipped: true, reason: clicked.reason ?? 'Not clickable' } : { ok: false, reason: clicked.reason ?? 'Not clickable' };
     };
     server.registerTool('cocos_run_steps', {
-      description: 'Run a short flow in one call instead of one tool call per action: steps click, type, key, read (several node or component properties in one step, returned as values: use it to see game state without extra calls), wait (until a node exists, is gone, is active, or is hidden: gone or inactive, which is how a closed popup usually looks), wait_property (equals, notEquals, or matches a regex; returns the matched value), and sleep run in order, stopping at the first failure. Use ifPresent on click or wait for optional popups. Each node is looked up again at its step, so scene changes mid-flow are fine. Returns per-step results; handlers may call game servers.',
+      description: 'Run a short flow in one call instead of one tool call per action: steps click, type, drag, set_property, key, wait_network (wait until a request whose URL contains a string, optionally a method and exact status, completes after the flow started or the previous wait_network; needs --allow-browser-data; top level only), assert (read once and compare, no waiting; fails with expected and actual), screenshot (small image of one node, top level only), repeat (run up to 10 sub-steps up to 20 times, or until a property matches), read (several node or component properties in one step, returned as values: use it to see game state without extra calls), wait (until a node exists, is gone, is active, or is hidden: gone or inactive, which is how a closed popup usually looks), wait_property (equals, notEquals, or matches a regex; returns the matched value), and sleep run in order, stopping at the first failure. Use ifPresent on click or wait for optional popups. Each node is looked up again at its step, so scene changes mid-flow are fine. Returns per-step results (plus recent console errors when a step fails and --allow-browser-data is on); handlers may call game servers.',
       inputSchema: obj({ pageUrl, steps: z.array(stepSchema).min(1).max(20), totalTimeoutMs: z.number().int().min(1_000).max(120_000).optional() }),
       annotations: realInput,
     }, async input => {
       try {
         const page = await browser.page(input.pageUrl);
+        if (input.steps.some(step => step.do === 'wait_network') && !options.allowBrowserData) throw new InspectorError('BROWSER_DATA_DISABLED', 'wait_network reads request data: start the server with --allow-browser-data');
+        const net: NetCursor = { after: 0 };
+        // Take the cursor before the first step so the request a click fires is already newer than it.
+        if (input.steps.some(step => step.do === 'wait_network')) net.after = (await listRequests(page)).reduce((max, row) => Math.max(max, row.id), 0);
         const deadline = Date.now() + (input.totalTimeoutMs ?? 60_000);
         const results: Array<Record<string, unknown>> = [];
         let failedAt: number | undefined;
         for (const [i, step] of input.steps.entries()) {
           const started = Date.now();
-          const label = step.do === 'sleep' || step.do === 'key' || step.do === 'read' ? {} : { target: step.uuid ?? step.path };
+          const label = step.do === 'sleep' || step.do === 'key' || step.do === 'read' || step.do === 'repeat' ? {} : step.do === 'wait_network' ? { target: step.urlContains } : { target: step.uuid ?? step.path ?? ('text' in step ? step.text : undefined) };
           if (started >= deadline) { results.push({ i, do: step.do, ...label, ok: false, ms: 0, reason: 'totalTimeoutMs exceeded' }); failedAt = i; break; }
           try {
-            const { detail, ...result } = await runStep(page, step, deadline);
-            results.push({ i, do: step.do, ...label, ...result, ...(step.do === 'read' || step.do === 'wait_property' ? { value: detail } : {}), ms: Date.now() - started });
+            const { detail, ...result } = await runStep(page, step, deadline, net);
+            results.push({ i, do: step.do, ...label, ...result, ...(['read', 'wait_property', 'assert', 'repeat', 'screenshot', 'set_property', 'wait_network'].includes(step.do) ? { value: detail } : {}), ms: Date.now() - started });
           } catch (error) {
             const failed = failure(error).structuredContent as { code: string; message: string };
             results.push({ i, do: step.do, ...label, ok: false, ms: Date.now() - started, reason: `${failed.code}: ${failed.message}` });
           }
           if (results[i]!.ok === false) { failedAt = i; break; }
         }
-        return response({ completed: failedAt === undefined, ...(failedAt === undefined ? {} : { failedAt }), steps: results, notRun: input.steps.length - results.length });
+        // A failed flow usually needs the page's own errors next; attach them (redacted) instead of costing another call.
+        let consoleErrors: unknown;
+        if (failedAt !== undefined && web && options.allowBrowserData) {
+          consoleErrors = await consoleMessages(page, { types: ['error', 'pageerror'], limit: 5 }).then(result => (result as { messages: unknown }).messages, () => undefined);
+        }
+        return response({ completed: failedAt === undefined, ...(failedAt === undefined ? {} : { failedAt }), steps: results, notRun: input.steps.length - results.length, ...(consoleErrors ? { consoleErrors } : {}) });
       } catch (error) {
         return failure(error);
       }

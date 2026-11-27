@@ -864,7 +864,28 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     assert.deepEqual(JSON.parse(local.entries.find((entry: { key: string }) => entry.key === 'settings').value), { volume: 3, password: '[redacted]' });
     const cookies = await call(client, 'cocos_storage', { pageUrl, area: 'cookies' });
     assert.equal(cookies.entries.find((entry: { name: string }) => entry.name === 'sid').value, '[redacted]');
-    const everything = JSON.stringify([consoleResult, requests, detail, local, cookies]);
+    // Find and click by visible text: the fixture's TitleLabel shows 'Inspector title'.
+    const byText = await call(client, 'cocos_find_node', { pageUrl, text: 'Inspector title' });
+    assert.equal(byText.matches.length, 1, JSON.stringify(byText));
+    assert.equal(byText.matches[0].text, 'Inspector title');
+    assert.equal((await call(client, 'cocos_find_node', { pageUrl, textContains: 'nspector tit' })).matches.length, 1);
+    assert.equal((await call(client, 'cocos_find_node', { pageUrl, text: 'Inspector' })).matches.length, 0);
+    const textClick = await call(client, 'cocos_run_steps', { pageUrl, steps: [{ do: 'click', text: 'Inspector title' }, { do: 'click', text: 'No such text', ifPresent: true }] });
+    assert.equal(textClick.completed, true, JSON.stringify(textClick));
+    assert.equal(textClick.steps[1].skipped, true);
+    // wait_network: the earlier /api/login never counts; a fetch fired mid-flow does, with its status asserted.
+    await page.evaluate(() => { setTimeout(() => { void fetch('/api/login?access_token=late-token-secret', { method: 'POST' }); void fetch('/missing-asset.png'); }, 300); });
+    const netWait = await call(client, 'cocos_run_steps', { pageUrl, steps: [
+      { do: 'wait_network', urlContains: '/api/login', method: 'POST', status: 200, timeoutMs: 5_000 },
+      { do: 'wait_network', urlContains: '/missing-asset.png', status: 200, timeoutMs: 5_000 },
+    ] });
+    assert.equal(netWait.completed, false);
+    assert.equal(netWait.steps[0].ok, true, JSON.stringify(netWait));
+    assert.equal(netWait.steps[0].value.status, 200);
+    assert.ok(netWait.steps[0].value.id > requests.requests[0].id, 'a new request, not the earlier one');
+    assert.match(netWait.steps[1].reason, /returned 404, expected 200/);
+    assert.equal(JSON.stringify(netWait).includes('late-token'), false);
+    const everything = JSON.stringify([consoleResult, requests, detail, local, cookies, netWait]);
     for (const secret of ['log-token', 'query-token', 'header-token', 'body-password', 'response-token', 'storage-token', 'storage-password', 'server-session']) assert.equal(everything.includes(secret), false, secret);
     assert.deepEqual((await client.callTool({ name: 'cocos_network_request', arguments: { pageUrl, id: 999_999 } })).structuredContent, { code: 'REQUEST_NOT_FOUND', message: 'Request 999999 not found; list requests again, older entries are dropped' });
     await page.evaluate(() => localStorage.clear());
