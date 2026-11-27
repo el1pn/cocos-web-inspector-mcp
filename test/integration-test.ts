@@ -505,6 +505,10 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     const waited = await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', equals: 7, timeoutMs: 1_000 });
     assert.deepEqual(waited, { matched: true, key: 'count', value: 7, polls: 1 });
     assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', equals: 8, timeoutMs: 300 })).matched, false);
+    assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', notEquals: 8, timeoutMs: 300 })).matched, true);
+    assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', notEquals: 7, timeoutMs: 300, intervalMs: 50 })).matched, false);
+    assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', matches: '^[0-9]$', timeoutMs: 300 })).matched, true);
+    assert.equal((await call(client, 'cocos_wait_for_property', { pageUrl, uuid: panelUuid, componentUuid: fixtureComponentUuid, key: 'count', matches: '^8', timeoutMs: 300, intervalMs: 50 })).matched, false);
     assert.equal((await client.callTool({ name: 'cocos_step_frame', arguments: { pageUrl } })).isError, true);
     // A new scheduler timer spends its first update initializing, so register it while the game still runs.
     await page.evaluate(() => {

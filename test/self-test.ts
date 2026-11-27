@@ -1644,6 +1644,51 @@ test('MCP cocos_run_steps runs a flow, skips optional nodes, and stops at the fi
   }
 });
 
+test('MCP read step and notEquals/matches wait for a turn-based game state', async () => {
+  let turn = 'opponent';
+  let polls = 0;
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    evaluate: async (_fn: unknown, request: any) => {
+      if (request.action === 'findNode') return request.path === '/Missing' ? { matches: [] } : { matches: [{ uuid: request.path, activeInHierarchy: true }] };
+      if (request.action === 'getProperties') {
+        if (request.uuid === '/Table/Turn' && ++polls >= 3) turn = 'me:15';
+        return { properties: { string: request.uuid === '/Table/Turn' ? turn : 'Score 42' } };
+      }
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowRuntimeMutation: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const call = async (name: string, arguments_: Record<string, unknown>) => client.callTool({ name, arguments: arguments_ }) as Promise<any>;
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const run = (await call('cocos_run_steps', { steps: [
+      { do: 'wait_property', path: '/Table/Turn', key: 'string', matches: '^me', timeoutMs: 2_000, intervalMs: 50 },
+      { do: 'read', reads: [{ path: '/Table/Turn', key: 'string' }, { path: '/Table/Score', key: 'string' }, { path: '/Missing', key: 'string' }] },
+    ] })).structuredContent;
+    assert.equal(run.completed, true);
+    assert.equal(run.steps[0].value, 'me:15');
+    assert.deepEqual(run.steps[1].value.map((item: any) => item.value), ['me:15', 'Score 42', null]);
+    assert.match(run.steps[1].value[2].gone, /Node not found/);
+    const notEqual = (await call('cocos_wait_for_property', { path: '/Table/Turn', key: 'string', notEquals: 'opponent', timeoutMs: 500, intervalMs: 50 })).structuredContent;
+    assert.equal(notEqual.matched, true);
+    assert.equal((await call('cocos_wait_for_property', { path: '/Table/Turn', key: 'string', notEquals: 'me:15', timeoutMs: 100, intervalMs: 50 })).structuredContent.matched, false);
+    assert.equal((await call('cocos_wait_for_property', { path: '/Missing', key: 'string', notEquals: 'x', timeoutMs: 100, intervalMs: 50 })).structuredContent.matched, false, 'a missing node never differs');
+    const failed = (await call('cocos_run_steps', { steps: [{ do: 'wait_property', path: '/Table/Turn', key: 'string', matches: '^nope', timeoutMs: 100, intervalMs: 50 }] })).structuredContent;
+    assert.match(failed.steps[0].reason, /not matching \/\^nope\//);
+    for (const arguments_ of [{ path: '/a', key: 'k' }, { path: '/a', key: 'k', equals: 1, notEquals: 2 }, { path: '/a', key: 'k', matches: '(' }]) {
+      assert.equal((await call('cocos_wait_for_property', arguments_)).isError, true, JSON.stringify(arguments_));
+    }
+    for (const step of [{ do: 'read', reads: [] }, { do: 'read', reads: [{ key: 'k' }] }, { do: 'wait_property', path: '/a', key: 'k' }]) {
+      assert.equal((await call('cocos_run_steps', { steps: [step] })).isError, true, JSON.stringify(step));
+    }
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
 test('cocos_run_steps is registered only with runtime mutation', async () => {
   const server = createServer({ page: async () => ({}), close: async () => {} } as any);
   const client = new Client({ name: 'self-test', version: '1.0.0' });

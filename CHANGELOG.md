@@ -6,6 +6,8 @@ All notable changes are documented here.
 
 ### Added
 
+- `cocos_run_steps` has a `read` step that returns up to 10 node or component properties in one step, so an agent sees a whole game state without extra calls. A missing node reads as `null` with a `gone` reason.
+- `cocos_wait_for_property` and the `wait_property` step accept `notEquals` and `matches` (regular expression on the string form) besides `equals`; provide exactly one. A missing node never matches. `wait_property` now returns the matched value.
 - `cocos_run_steps` runs a short flow (click, type, key, wait until a node exists, is gone, active, or hidden, wait_property, sleep) in one call, stops at the first failure, and skips optional popups with `ifPresent`. It removes one agent round trip per action. Registered only with `--allow-runtime-mutation`; works on web and native.
 - `--allow-recording` registers `cocos_start_recording` and `cocos_stop_recording`. Web recordings use Chromium screencast frames and `ffmpeg`; native Android recordings use `adb screenrecord`. Both return a local MP4 path under a server-controlled directory.
 - `--log-file <path>` appends one JSON line per tool call (time, tool, masked arguments, duration, ok, error, response bytes) for debugging. Results are never logged.

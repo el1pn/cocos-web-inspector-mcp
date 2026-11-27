@@ -32,6 +32,8 @@ const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: t
 const temporaryMutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const runtimeMutation = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const finiteNumber = z.number().finite().min(-1_000_000).max(1_000_000);
+const matchValueSchema = z.union([z.boolean(), finiteNumber, z.string().max(2_000), z.null()]);
+const matchFields = { equals: matchValueSchema.optional(), notEquals: matchValueSchema.optional(), matches: z.string().min(1).max(200).optional() };
 const vector3 = z.object({ x: finiteNumber, y: finiteNumber, z: finiteNumber }).strict();
 const quaternion = z.object({ x: finiteNumber, y: finiteNumber, z: finiteNumber, w: finiteNumber }).strict();
 const propertyValue = z.union([
@@ -64,6 +66,20 @@ async function resolveUuid(page: Page, input: Target): Promise<string> {
 // Agents pass "true" or "8000" for a boolean or number property: compare primitives of different types by their string form.
 const looseEquals = (value: unknown, expected: unknown) => value === expected
   || ['string', 'number', 'boolean'].includes(typeof value) && ['string', 'number', 'boolean'].includes(typeof expected) && String(value) === String(expected);
+
+type Matcher = { equals?: boolean | number | string | null | undefined; notEquals?: boolean | number | string | null | undefined; matches?: string | undefined };
+const matcherCount = (m: Matcher) => [m.equals, m.notEquals, m.matches].filter(value => value !== undefined).length;
+const oneMatcher = (m: Matcher) => matcherCount(m) === 1;
+const oneMatcherMessage = 'Provide exactly one of equals, notEquals, or matches';
+const validRegex = (m: Matcher) => { try { if (m.matches !== undefined) new RegExp(m.matches); return true; } catch { return false; } };
+// Only primitives can match: an object or missing value never equals, differs from, or matches anything, so a wait keeps polling.
+const isPrimitive = (value: unknown) => ['string', 'number', 'boolean'].includes(typeof value) || value === null;
+const matchValue = (value: unknown, m: Matcher): boolean => {
+  if (m.notEquals !== undefined) return isPrimitive(value) && !looseEquals(value, m.notEquals);
+  // ponytail: JS RegExp on a bounded value and a 200-char pattern; a pathological pattern can stall this process, swap for an RE2 engine if agents are untrusted.
+  if (m.matches !== undefined) return ['string', 'number', 'boolean'].includes(typeof value) && new RegExp(m.matches).test(String(value));
+  return looseEquals(value, m.equals);
+};
 
 function response(data: unknown) {
   return {
@@ -291,35 +307,38 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     annotations: readOnly,
   }, input => executeNode(input, uuid => ({ action: 'getProperties', uuid, componentType: input.componentType, componentUuid: input.componentUuid, maxDepth: input.maxDepth })));
 
-  type WaitInput = Target & { componentType?: string | undefined; componentUuid?: string | undefined; key: string; equals: boolean | number | string | null; timeoutMs?: number | undefined; intervalMs?: number | undefined };
+  type ReadInput = Target & { componentType?: string | undefined; componentUuid?: string | undefined; key: string };
+  type WaitInput = ReadInput & Matcher & { timeoutMs?: number | undefined; intervalMs?: number | undefined };
+  // Resolve a path on every call so a scene switch or a node still being created reads as "gone", not as a hard error.
+  const readProp = async (page: Page, input: ReadInput, known?: string) => {
+    try {
+      const uuid = known ?? await resolveUuid(page, input);
+      const value = ((await runBridge(page, { action: 'getProperties', uuid, componentType: input.componentType, componentUuid: input.componentUuid, maxDepth: 0 })) as { properties?: Record<string, unknown> }).properties?.[input.key];
+      return { uuid, value, gone: undefined as string | undefined };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '';
+      if (!/Node not found|Active Cocos scene not found|Component not found/.test(message)) throw error;
+      return { uuid: input.uuid, value: undefined, gone: message.replace(/^page\.evaluate: (?:Error: )?/, '').split('\n')[0]! };
+    }
+  };
   const waitProperty = async (page: Page, input: WaitInput) => {
     const deadline = Date.now() + (input.timeoutMs ?? 5_000);
     let polls = 0;
-    let value: unknown;
-    let gone: string | undefined;
-    // A path is resolved on every poll so a scene switch or a node still being created does not end the wait early.
-    for (let uuid = input.uuid;;) {
+    let uuid = input.uuid;
+    for (;;) {
       polls++;
-      try {
-        uuid ??= await resolveUuid(page, input);
-        value = ((await runBridge(page, { action: 'getProperties', uuid, componentType: input.componentType, componentUuid: input.componentUuid, maxDepth: 0 })) as { properties?: Record<string, unknown> }).properties?.[input.key];
-        gone = undefined;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : '';
-        if (!/Node not found|Active Cocos scene not found|Component not found/.test(message)) throw error;
-        gone = message.replace(/^page\.evaluate: (?:Error: )?/, '').split('\n')[0]!;
-        value = undefined;
-        if (!input.uuid) uuid = undefined;
-      }
-      if (gone === undefined && looseEquals(value, input.equals) || Date.now() >= deadline) break;
+      const read = await readProp(page, input, uuid);
+      uuid = read.uuid;
+      const matched = read.gone === undefined && matchValue(read.value, input);
+      if (matched || Date.now() >= deadline) return { matched, key: input.key, value: read.value ?? null, polls, ...(read.gone ? { gone: read.gone } : {}) };
       await new Promise(resolve => setTimeout(resolve, input.intervalMs ?? 200));
     }
-    return { matched: gone === undefined && looseEquals(value, input.equals), key: input.key, value: value ?? null, polls, ...(gone ? { gone } : {}) };
   };
 
   server.registerTool('cocos_wait_for_property', {
-    description: 'Poll one top-level property of a Cocos node or component until it equals a value or the timeout passes. Booleans, numbers, and strings of different types match by string form ("true" matches true, "8000" matches 8000).',
-    inputSchema: obj({ pageUrl, ...target, componentType: blank(z.string().min(1)), componentUuid: blank(z.string().min(1)), key: z.string().min(1).max(200), equals: z.union([z.boolean(), finiteNumber, z.string().max(2_000), z.null()]), timeoutMs: z.number().int().min(100).max(30_000, 'timeoutMs max is 30000').optional(), intervalMs: z.number().int().min(50).max(5_000, 'intervalMs max is 5000').optional() }).refine(oneTarget, oneTargetMessage)
+    description: 'Poll one top-level property of a Cocos node or component until it equals a value (equals), differs from one (notEquals), or its string form matches a regular expression (matches), or the timeout passes. Booleans, numbers, and strings of different types compare by string form ("true" matches true, "8000" matches 8000). Missing nodes never match.',
+    inputSchema: obj({ pageUrl, ...target, componentType: blank(z.string().min(1)), componentUuid: blank(z.string().min(1)), key: z.string().min(1).max(200), ...matchFields, timeoutMs: z.number().int().min(100).max(30_000, 'timeoutMs max is 30000').optional(), intervalMs: z.number().int().min(50).max(5_000, 'intervalMs max is 5000').optional() }).refine(oneTarget, oneTargetMessage)
+      .refine(oneMatcher, oneMatcherMessage).refine(validRegex, 'matches is not a valid regular expression')
       .refine(value => !(value.componentType && value.componentUuid), 'Provide componentType or componentUuid, not both'),
     annotations: readOnly,
   }, async input => {
@@ -392,16 +411,27 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       obj({ do: z.literal('type'), ...stepTarget, text: z.string().max(2_000), submit: z.boolean().optional() }).refine(oneTarget, oneTargetMessage),
       obj({ do: z.literal('key'), key: z.string().regex(keyPattern, 'Use Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, or one letter or digit') }),
       obj({ do: z.literal('wait'), ...stepTarget, until: z.enum(['exists', 'gone', 'active', 'hidden']), timeoutMs: stepTimeout, intervalMs: z.number().int().min(50).max(2_000).optional(), ifPresent: z.boolean().optional() }).refine(oneTarget, oneTargetMessage),
-      obj({ do: z.literal('wait_property'), ...stepTarget, componentType: blank(z.string().min(1)), key: z.string().min(1).max(200), equals: z.union([z.boolean(), finiteNumber, z.string().max(2_000), z.null()]), timeoutMs: stepTimeout, intervalMs: z.number().int().min(50).max(2_000).optional() }).refine(oneTarget, oneTargetMessage),
+      obj({ do: z.literal('wait_property'), ...stepTarget, componentType: blank(z.string().min(1)), key: z.string().min(1).max(200), ...matchFields, timeoutMs: stepTimeout, intervalMs: z.number().int().min(50).max(2_000).optional() }).refine(oneTarget, oneTargetMessage).refine(oneMatcher, oneMatcherMessage).refine(validRegex, 'matches is not a valid regular expression'),
+      obj({ do: z.literal('read'), reads: z.array(obj({ ...stepTarget, componentType: blank(z.string().min(1)), key: z.string().min(1).max(200) }).refine(oneTarget, oneTargetMessage)).min(1).max(10) }),
       obj({ do: z.literal('sleep'), ms: z.number().int().min(1).max(2_000) }),
     ]);
     type Step = z.infer<typeof stepSchema>;
     const runStep = async (page: Page, step: Step, deadline: number): Promise<{ ok: boolean; skipped?: true; reason?: string; detail?: unknown }> => {
       if (step.do === 'sleep') { await new Promise(resolve => setTimeout(resolve, Math.min(step.ms, Math.max(deadline - Date.now(), 0)))); return { ok: true }; }
       if (step.do === 'key') return { ok: true, detail: await (web ? pressKey : nativePressKey)(page, step.key) };
+      if (step.do === 'read') {
+        // One round trip for a whole game state; a missing node reads as null with a reason instead of failing the flow.
+        const values = [];
+        for (const item of step.reads) {
+          const read = await readProp(page, item);
+          values.push({ target: item.uuid ?? item.path, key: item.key, value: read.value ?? null, ...(read.gone ? { gone: read.gone } : {}) });
+        }
+        return { ok: true, detail: values };
+      }
       if (step.do === 'wait_property') {
         const result = await waitProperty(page, { ...step, timeoutMs: Math.min(step.timeoutMs ?? 5_000, Math.max(deadline - Date.now(), 100)) });
-        return result.matched ? { ok: true } : { ok: false, reason: `Property ${step.key} is ${JSON.stringify(result.value)}${'gone' in result ? ` (${result.gone})` : ''}, not ${JSON.stringify(step.equals)}` };
+        const want = step.notEquals !== undefined ? `not ${JSON.stringify(step.notEquals)}` : step.matches !== undefined ? `not matching /${step.matches}/` : `not ${JSON.stringify(step.equals)}`;
+        return result.matched ? { ok: true, detail: result.value } : { ok: false, reason: `Property ${step.key} is ${JSON.stringify(result.value)}${'gone' in result ? ` (${result.gone})` : ''}, ${want}` };
       }
       if (step.do === 'wait') {
         const stop = Math.min(Date.now() + (step.timeoutMs ?? 5_000), deadline);
@@ -433,7 +463,7 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       return step.ifPresent ? { ok: true, skipped: true, reason: clicked.reason ?? 'Not clickable' } : { ok: false, reason: clicked.reason ?? 'Not clickable' };
     };
     server.registerTool('cocos_run_steps', {
-      description: 'Run a short flow in one call instead of one tool call per action: steps click, type, key, wait (until a node exists, is gone, is active, or is hidden: gone or inactive, which is how a closed popup usually looks), wait_property, and sleep run in order, stopping at the first failure. Use ifPresent on click or wait for optional popups. Each node is looked up again at its step, so scene changes mid-flow are fine. Returns per-step results; handlers may call game servers.',
+      description: 'Run a short flow in one call instead of one tool call per action: steps click, type, key, read (several node or component properties in one step, returned as values: use it to see game state without extra calls), wait (until a node exists, is gone, is active, or is hidden: gone or inactive, which is how a closed popup usually looks), wait_property (equals, notEquals, or matches a regex; returns the matched value), and sleep run in order, stopping at the first failure. Use ifPresent on click or wait for optional popups. Each node is looked up again at its step, so scene changes mid-flow are fine. Returns per-step results; handlers may call game servers.',
       inputSchema: obj({ pageUrl, steps: z.array(stepSchema).min(1).max(20), totalTimeoutMs: z.number().int().min(1_000).max(120_000).optional() }),
       annotations: realInput,
     }, async input => {
@@ -444,11 +474,11 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
         let failedAt: number | undefined;
         for (const [i, step] of input.steps.entries()) {
           const started = Date.now();
-          const label = step.do === 'sleep' || step.do === 'key' ? {} : { target: step.uuid ?? step.path };
+          const label = step.do === 'sleep' || step.do === 'key' || step.do === 'read' ? {} : { target: step.uuid ?? step.path };
           if (started >= deadline) { results.push({ i, do: step.do, ...label, ok: false, ms: 0, reason: 'totalTimeoutMs exceeded' }); failedAt = i; break; }
           try {
             const { detail, ...result } = await runStep(page, step, deadline);
-            results.push({ i, do: step.do, ...label, ...result, ms: Date.now() - started });
+            results.push({ i, do: step.do, ...label, ...result, ...(step.do === 'read' || step.do === 'wait_property' ? { value: detail } : {}), ms: Date.now() - started });
           } catch (error) {
             const failed = failure(error).structuredContent as { code: string; message: string };
             results.push({ i, do: step.do, ...label, ok: false, ms: Date.now() - started, reason: `${failed.code}: ${failed.message}` });
