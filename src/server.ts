@@ -90,6 +90,25 @@ const matchValue = (value: unknown, m: Matcher): boolean => {
   return looseEquals(value, m.equals);
 };
 
+// Pass/fail thresholds for a frame profile, so CI-style flows get a verdict instead of numbers to eyeball.
+const budgetSchema = obj({ minFps: z.number().min(1).max(240).optional(), maxP95Ms: z.number().min(1).max(1_000).optional(), maxFrameMs: z.number().min(1).max(10_000).optional(), maxDrawCalls: z.number().int().min(1).max(100_000).optional(), maxSpikes: z.number().int().min(0).max(600).optional() });
+type Budget = z.infer<typeof budgetSchema>;
+function checkBudget(profile: any, budget: Budget): { passed: boolean; violations: string[] } {
+  const violations: string[] = [];
+  if (!profile?.sampled) return { passed: false, violations: [`no frames sampled${profile?.reason ? `: ${profile.reason}` : ''}`] };
+  const over = (label: string, actual: number | undefined, limit: number | undefined, lower = false) => {
+    if (limit === undefined) return;
+    if (actual === undefined) violations.push(`${label} unavailable on this runtime`);
+    else if (lower ? actual < limit : actual > limit) violations.push(`${label} ${actual} ${lower ? 'below' : 'above'} ${limit}`);
+  };
+  over('fps', profile.fps, budget.minFps, true);
+  over('p95 frame ms', profile.frameMs?.p95, budget.maxP95Ms);
+  over('max frame ms', profile.frameMs?.max, budget.maxFrameMs);
+  over('max draw calls', profile.drawCalls?.max, budget.maxDrawCalls);
+  over('spikes', profile.spikes, budget.maxSpikes);
+  return { passed: violations.length === 0, violations };
+}
+
 function response(data: unknown) {
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(data) }],
@@ -415,6 +434,7 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
     // One call per flow: every LLM round trip between steps is slower than the step itself.
     const stepTimeout = z.number().int().min(100).max(30_000).optional();
     const stepTarget = { ...target };
+    const validRegex2 = (value: { ignore?: string | undefined }) => { try { if (value.ignore !== undefined) new RegExp(value.ignore); return true; } catch { return false; } };
     const simpleSteps = [
       // click also finds its node by the text it shows, so a flow survives a scene rebuild that renames or moves nodes.
       obj({ do: z.literal('click'), ...stepTarget, text: blank(z.string().min(1).max(500)), ifPresent: z.boolean().optional() }).refine(value => [value.uuid, value.path, value.text].filter(item => item !== undefined).length === 1, 'Provide exactly one of uuid, path, or text'),
@@ -432,13 +452,16 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       ...simpleSteps,
       // Images dominate the 200,000-byte response ceiling, so a screenshot is capped small and top level only.
       obj({ do: z.literal('screenshot'), ...stepTarget, maxBytes: z.number().int().min(1_000).max(50_000).optional() }).refine(oneTarget, oneTargetMessage),
-      // Top level only: the cursor that decides which requests count as new is kept per flow.
+      // Top level only: the cursors that decide which requests and errors count as new are kept per flow.
+      obj({ do: z.literal('assert_no_errors'), ignore: z.string().min(1).max(200).optional() }).refine(validRegex2, 'ignore is not a valid regular expression'),
+      obj({ do: z.literal('advance_time'), gameMs: z.number().int().min(100).max(60_000), scale: z.number().min(2).max(20).optional() }),
+      obj({ do: z.literal('frame_profile'), frames: z.number().int().min(2).max(600).optional(), timeoutMs: stepTimeout, budget: budgetSchema }),
       obj({ do: z.literal('wait_network'), urlContains: z.string().min(1).max(500), method: blank(z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])), status: z.number().int().min(100).max(599).optional(), timeoutMs: stepTimeout, intervalMs: z.number().int().min(50).max(2_000).optional() }),
       // One level only: no nested repeat, so the work stays bounded by times x steps.
       obj({ do: z.literal('repeat'), times: z.number().int().min(1).max(20), steps: z.array(z.discriminatedUnion('do', simpleSteps)).min(1).max(10), until: obj({ ...stepTarget, componentType: blank(z.string().min(1)), key: z.string().min(1).max(200), ...matchFields }).refine(oneTarget, oneTargetMessage).refine(oneMatcher, oneMatcherMessage).refine(validRegex, 'matches is not a valid regular expression').optional() }),
     ]);
     type Step = z.infer<typeof stepSchema>;
-    type NetCursor = { after: number };
+    type NetCursor = { after: number; errors: number };
     type NetRow = { id: number; method: string; url: string; status: number | null; failure?: string; durationMs?: number };
     const listRequests = async (page: Page) => ((await (web ? networkRequests : nativeNetworkRequests)(page, { limit: 200 })) as { requests: NetRow[] }).requests;
     const runStep = async (page: Page, step: Step, deadline: number, net: NetCursor): Promise<{ ok: boolean; skipped?: true; reason?: string; detail?: unknown }> => {
@@ -468,6 +491,30 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
         // With until, running out of iterations without reaching it is a failure; without until, times is the goal.
         if (until && done >= step.times && !await met()) return { ok: false, reason: `repeat: ${until.key} did not reach the expected value within ${step.times} iterations` };
         return { ok: true, detail: { iterations: done } };
+      }
+      if (step.do === 'assert_no_errors') {
+        // Playwright keeps the last 200 messages; if errors scroll out between marks the count shrinks and later errors can be missed (ponytail: web only, 200-message window; console events reach Node a moment after the page logs them, so an error logged right before the flow can count as new).
+        const { messages, matched } = await consoleMessages(page, { types: ['error', 'pageerror'], limit: 200 }) as { messages: Array<{ type: string; text: string }>; matched: number };
+        const fresh = messages.slice(Math.max(messages.length - Math.max(matched - net.errors, 0), 0)).filter(message => !step.ignore || !new RegExp(step.ignore).test(message.text));
+        net.errors = matched;
+        return fresh.length === 0 ? { ok: true } : { ok: false, reason: `${fresh.length} console error(s) since the last check: ${fresh.slice(0, 3).map(message => `${message.type}: ${message.text.slice(0, 200)}`).join(' | ')}` };
+      }
+      if (step.do === 'advance_time') {
+        // Scale the game clock up, wait the matching real time, restore: skips timers and animations without a long sleep. A large dt per frame can skip physics or tween frames.
+        const scale = step.scale ?? 10;
+        const before = ((await runBridge(page, { action: 'timeScale', scale: undefined })) as { after: { scale: number } }).after.scale;
+        await runBridge(page, { action: 'timeScale', scale: before * scale > 100 ? 100 : before * scale });
+        try {
+          await new Promise(resolve => setTimeout(resolve, Math.min(Math.ceil(step.gameMs / scale), Math.max(deadline - Date.now(), 0))));
+        } finally {
+          await runBridge(page, { action: 'timeScale', scale: before });
+        }
+        return { ok: true, detail: { gameMs: step.gameMs, scale: before * scale > 100 ? 100 / before : scale } };
+      }
+      if (step.do === 'frame_profile') {
+        const profile = await runBridge(page, { action: 'frameProfile', frames: step.frames, timeoutMs: Math.min(step.timeoutMs ?? 10_000, Math.max(deadline - Date.now(), 100)) }) as any;
+        const verdict = checkBudget(profile, step.budget);
+        return { ok: verdict.passed, ...(verdict.passed ? {} : { reason: `Over budget: ${verdict.violations.join('; ')}` }), detail: { fps: profile.fps, frameMs: profile.frameMs, drawCalls: profile.drawCalls, spikes: profile.spikes, ...verdict } };
       }
       if (step.do === 'wait_network') {
         // Requests seen before the flow started, or already matched by an earlier wait_network, never count: a click's request fires before this step begins.
@@ -531,14 +578,19 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
       return step.ifPresent ? { ok: true, skipped: true, reason: clicked.reason ?? 'Not clickable' } : { ok: false, reason: clicked.reason ?? 'Not clickable' };
     };
     server.registerTool('cocos_run_steps', {
-      description: 'Run a short flow in one call instead of one tool call per action: steps click, type, drag, set_property, key, wait_network (wait until a request whose URL contains a string, optionally a method and exact status, completes after the flow started or the previous wait_network; needs --allow-browser-data; top level only), assert (read once and compare, no waiting; fails with expected and actual), screenshot (small image of one node, top level only), repeat (run up to 10 sub-steps up to 20 times, or until a property matches), read (several node or component properties in one step, returned as values: use it to see game state without extra calls), wait (until a node exists, is gone, is active, or is hidden: gone or inactive, which is how a closed popup usually looks), wait_property (equals, notEquals, or matches a regex; returns the matched value), and sleep run in order, stopping at the first failure. Use ifPresent on click or wait for optional popups. Each node is looked up again at its step, so scene changes mid-flow are fine. Returns per-step results (plus recent console errors when a step fails and --allow-browser-data is on); handlers may call game servers.',
+      description: 'Run a short flow in one call instead of one tool call per action: steps click, type, drag, set_property, key, wait_network (wait until a request whose URL contains a string, optionally a method and exact status, completes after the flow started or the previous wait_network; needs --allow-browser-data; top level only), assert_no_errors (fail if the page logged console errors or uncaught exceptions since the flow started or the previous check; optional ignore regex; needs --allow-browser-data; web only), advance_time (run gameMs of game time in about gameMs/scale real time by scaling the clock, default 10x, then restore it, to skip timers and animations), frame_profile (sample frames and fail when a budget of minFps, maxP95Ms, maxFrameMs, maxDrawCalls, or maxSpikes is exceeded), assert (read once and compare, no waiting; fails with expected and actual), screenshot (small image of one node, top level only), repeat (run up to 10 sub-steps up to 20 times, or until a property matches), read (several node or component properties in one step, returned as values: use it to see game state without extra calls), wait (until a node exists, is gone, is active, or is hidden: gone or inactive, which is how a closed popup usually looks), wait_property (equals, notEquals, or matches a regex; returns the matched value), and sleep run in order, stopping at the first failure. Use ifPresent on click or wait for optional popups. Each node is looked up again at its step, so scene changes mid-flow are fine. Returns per-step results (plus recent console errors when a step fails and --allow-browser-data is on); handlers may call game servers.',
       inputSchema: obj({ pageUrl, steps: z.array(stepSchema).min(1).max(20), totalTimeoutMs: z.number().int().min(1_000).max(120_000).optional() }),
       annotations: realInput,
     }, async input => {
       try {
         const page = await browser.page(input.pageUrl);
-        if (input.steps.some(step => step.do === 'wait_network') && !options.allowBrowserData) throw new InspectorError('BROWSER_DATA_DISABLED', 'wait_network reads request data: start the server with --allow-browser-data');
-        const net: NetCursor = { after: 0 };
+        const needsData = input.steps.some(step => step.do === 'wait_network' || step.do === 'assert_no_errors');
+        if (needsData && !options.allowBrowserData) throw new InspectorError('BROWSER_DATA_DISABLED', 'wait_network and assert_no_errors read browser data: start the server with --allow-browser-data');
+        const net: NetCursor = { after: 0, errors: 0 };
+        if (input.steps.some(step => step.do === 'assert_no_errors')) {
+          if (!web) throw new InspectorError('BROWSER_DATA_DISABLED', 'assert_no_errors reads the browser console: it is not available for native runtimes');
+          net.errors = ((await consoleMessages(page, { types: ['error', 'pageerror'], limit: 1 })) as { matched: number }).matched;
+        }
         // Take the cursor before the first step so the request a click fires is already newer than it.
         if (input.steps.some(step => step.do === 'wait_network')) net.after = (await listRequests(page)).reduce((max, row) => Math.max(max, row.id), 0);
         const deadline = Date.now() + (input.totalTimeoutMs ?? 60_000);
@@ -546,11 +598,12 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
         let failedAt: number | undefined;
         for (const [i, step] of input.steps.entries()) {
           const started = Date.now();
-          const label = step.do === 'sleep' || step.do === 'key' || step.do === 'read' || step.do === 'repeat' ? {} : step.do === 'wait_network' ? { target: step.urlContains } : { target: step.uuid ?? step.path ?? ('text' in step ? step.text : undefined) };
+          // Only a click's text names its target; a type step's text is what gets typed (maybe a password) and must never be echoed.
+          const label = step.do === 'wait_network' ? { target: step.urlContains } : step.do === 'click' ? { target: step.uuid ?? step.path ?? step.text } : 'uuid' in step || 'path' in step ? { target: (step as Target).uuid ?? (step as Target).path } : {};
           if (started >= deadline) { results.push({ i, do: step.do, ...label, ok: false, ms: 0, reason: 'totalTimeoutMs exceeded' }); failedAt = i; break; }
           try {
             const { detail, ...result } = await runStep(page, step, deadline, net);
-            results.push({ i, do: step.do, ...label, ...result, ...(['read', 'wait_property', 'assert', 'repeat', 'screenshot', 'set_property', 'wait_network'].includes(step.do) ? { value: detail } : {}), ms: Date.now() - started });
+            results.push({ i, do: step.do, ...label, ...result, ...(['read', 'wait_property', 'assert', 'repeat', 'screenshot', 'set_property', 'wait_network', 'advance_time', 'frame_profile'].includes(step.do) ? { value: detail } : {}), ms: Date.now() - started });
           } catch (error) {
             const failed = failure(error).structuredContent as { code: string; message: string };
             results.push({ i, do: step.do, ...label, ok: false, ms: Date.now() - started, reason: `${failed.code}: ${failed.message}` });
@@ -674,10 +727,13 @@ export function createServer(browser: BrowserConnection | NativeConnection, opti
   }, input => execute({ action: 'animationReport', limit: input.limit }, input.pageUrl));
 
   server.registerTool('cocos_frame_profile', {
-    description: 'Sample real frames for a while and report frame time (avg, p50, p95, max), fps, spike count, the worst frames, and draw call and triangle ranges. Needs the game running (not paused). Subscribes to the director for the sample window only.',
-    inputSchema: obj({ pageUrl, frames: z.number().int().min(2).max(600).optional(), timeoutMs: z.number().int().min(100).max(30_000).optional() }),
+    description: 'Sample real frames for a while and report frame time (avg, p50, p95, max), fps, spike count, the worst frames, and draw call and triangle ranges. Needs the game running (not paused). Subscribes to the director for the sample window only. Pass budget (minFps, maxP95Ms, maxFrameMs, maxDrawCalls, maxSpikes) to also get a pass/fail verdict with the violations.',
+    inputSchema: obj({ pageUrl, frames: z.number().int().min(2).max(600).optional(), timeoutMs: z.number().int().min(100).max(30_000).optional(), budget: budgetSchema.optional() }),
     annotations: { ...readOnly, idempotentHint: false },
-  }, input => execute({ action: 'frameProfile', frames: input.frames, timeoutMs: input.timeoutMs }, input.pageUrl));
+  }, input => run(async () => {
+    const profile = await runBridge(await browser.page(input.pageUrl), { action: 'frameProfile', frames: input.frames, timeoutMs: input.timeoutMs });
+    return input.budget ? { ...(profile as object), budget: checkBudget(profile, input.budget) } : profile;
+  }));
 
   server.registerTool('cocos_dynamic_atlas', {
     description: 'Report the Cocos dynamic atlas: config, each atlas page with its packed textures, positions, fill ratio, and GPU bytes, plus why visible sprites stayed out of it (DISABLED, COMPRESSED, TOO_LARGE, FILTER, NOT_PACKABLE, ATLAS_FULL, ...).',

@@ -873,6 +873,25 @@ for (const version of creatorVersions) test(`live Chromium exercises Cocos ${ver
     const textClick = await call(client, 'cocos_run_steps', { pageUrl, steps: [{ do: 'click', text: 'Inspector title' }, { do: 'click', text: 'No such text', ifPresent: true }] });
     assert.equal(textClick.completed, true, JSON.stringify(textClick));
     assert.equal(textClick.steps[1].skipped, true);
+    // assert_no_errors only sees errors logged after the flow started; advance_time skips game time and restores the clock; frame_profile budgets pass or fail.
+    await page.evaluate(() => { console.error('error before the flow'); setTimeout(() => console.error('error during the flow password=hunter2'), 800); });
+    // Playwright delivers console events a moment after the page logs them; wait so the earlier error is in the baseline.
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const errorFlow = await call(client, 'cocos_run_steps', { pageUrl, steps: [{ do: 'assert_no_errors' }, { do: 'sleep', ms: 1_400 }, { do: 'assert_no_errors' }] });
+    assert.equal(errorFlow.completed, false, JSON.stringify(errorFlow));
+    assert.equal(errorFlow.failedAt, 2, JSON.stringify(errorFlow));
+    assert.match(errorFlow.steps[2].reason, /error during the flow password=\[redacted\]/);
+    assert.doesNotMatch(errorFlow.steps[2].reason, /error before the flow|hunter2/);
+    const timeSkip = await call(client, 'cocos_run_steps', { pageUrl, steps: [{ do: 'advance_time', gameMs: 2_000, scale: 10 }] });
+    assert.equal(timeSkip.completed, true, JSON.stringify(timeSkip));
+    assert.ok(timeSkip.steps[0].ms < 1_500, `advance_time took ${timeSkip.steps[0].ms} ms for 2000 game ms`);
+    assert.equal((await call(client, 'cocos_set_time_scale', { pageUrl })).after.scale, 1, 'the clock is restored');
+    const budgeted = await call(client, 'cocos_run_steps', { pageUrl, steps: [{ do: 'frame_profile', frames: 20, budget: { minFps: 1, maxFrameMs: 10_000 } }] });
+    assert.equal(budgeted.completed, true, JSON.stringify(budgeted));
+    const overBudget = await call(client, 'cocos_run_steps', { pageUrl, steps: [{ do: 'frame_profile', frames: 20, budget: { minFps: 240, maxP95Ms: 1 } }] });
+    assert.equal(overBudget.completed, false);
+    assert.match(overBudget.steps[0].reason, /Over budget: /);
+    assert.equal((await call(client, 'cocos_frame_profile', { pageUrl, frames: 10, budget: { maxFrameMs: 10_000 } })).budget.passed, true);
     // wait_network: the earlier /api/login never counts; a fetch fired mid-flow does, with its status asserted.
     await page.evaluate(() => { setTimeout(() => { void fetch('/api/login?access_token=late-token-secret', { method: 'POST' }); void fetch('/missing-asset.png'); }, 300); });
     const netWait = await call(client, 'cocos_run_steps', { pageUrl, steps: [

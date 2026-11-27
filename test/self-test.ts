@@ -1851,6 +1851,101 @@ test('MCP run_steps wait_network ignores earlier requests, matches method and st
   }
 });
 
+test('MCP run_steps assert_no_errors, advance_time, and frame_profile budget', async () => {
+  const scales: number[] = [];
+  let scale = 1;
+  let errors: Array<{ type: string; text: string }> = [{ type: 'error', text: 'old failure before the flow' }];
+  let profile: any = { sampled: 60, fps: 58, frameMs: { avg: 17, p50: 16, p95: 20, max: 40 }, drawCalls: { min: 5, avg: 8, max: 12 }, spikes: 0 };
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    consoleMessages: async () => errors.map(error => ({ type: () => error.type, text: () => error.text, location: () => ({ url: '', lineNumber: 0, columnNumber: 0 }) })),
+    pageErrors: async () => [],
+    evaluate: async (_fn: unknown, request: any) => {
+      if (!request) return 0;
+      if (request.action === 'timeScale') { if (request.scale !== undefined) { scale = request.scale; scales.push(scale); } return { after: { scale } }; }
+      if (request.action === 'frameProfile') return profile;
+      throw new Error(`unexpected ${request.action}`);
+    },
+  };
+  const connect = async (flags: Record<string, boolean>) => {
+    const server = createServer({ page: async () => page, close: async () => {} } as any, { allowRuntimeMutation: true, ...flags });
+    const client = new Client({ name: 'self-test', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    return { server, client, run: async (steps: unknown[]) => client.callTool({ name: 'cocos_run_steps', arguments: { steps } }) as Promise<any> };
+  };
+  const { server, client, run } = await connect({ allowBrowserData: true });
+  try {
+    const clean = (await run([{ do: 'assert_no_errors' }])).structuredContent;
+    assert.equal(clean.completed, true, 'errors from before the flow are not counted');
+    const dirty = (await run([{ do: 'sleep', ms: 1 }, { do: 'assert_no_errors' }, { do: 'sleep', ms: 1 }])).structuredContent;
+    assert.equal(dirty.completed, true);
+    // Between the baseline and the check, the game logs a new error.
+    const flow = run([{ do: 'sleep', ms: 100 }, { do: 'assert_no_errors', ignore: 'harmless' }, { do: 'assert_no_errors' }]);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    errors = [...errors, { type: 'error', text: 'harmless warning text' }, { type: 'error', text: 'Socket closed token=abc123' }];
+    const result = (await flow).structuredContent;
+    assert.equal(result.failedAt, 1);
+    assert.match(result.steps[1].reason, /1 console error\(s\) since the last check: error: Socket closed token=\[redacted\]/);
+    assert.doesNotMatch(JSON.stringify(result), /abc123/, 'secrets stay masked everywhere');
+    assert.doesNotMatch(result.steps[1].reason, /harmless/, 'ignore filters the assertion');
+    const second = (await run([{ do: 'assert_no_errors' }])).structuredContent;
+    assert.equal(second.completed, true, 'each flow starts from a fresh baseline');
+
+    const advanced = (await run([{ do: 'advance_time', gameMs: 1_000, scale: 10 }])).structuredContent;
+    assert.equal(advanced.completed, true);
+    assert.deepEqual(scales, [10, 1], 'scaled up, then restored');
+    assert.equal(advanced.steps[0].value.scale, 10);
+    assert.ok(advanced.steps[0].ms < 500, 'about gameMs / scale in real time');
+    scale = 50;
+    scales.length = 0;
+    await run([{ do: 'advance_time', gameMs: 200, scale: 10 }]);
+    assert.deepEqual(scales, [100, 50], 'capped at 100 and the previous scale restored');
+
+    assert.equal((await run([{ do: 'frame_profile', budget: { minFps: 30, maxP95Ms: 25, maxDrawCalls: 20 } }])).structuredContent.completed, true);
+    profile = { ...profile, fps: 22, frameMs: { ...profile.frameMs, p95: 60 }, spikes: 4 };
+    const slow = (await run([{ do: 'frame_profile', budget: { minFps: 30, maxP95Ms: 25, maxSpikes: 0 } }])).structuredContent;
+    assert.equal(slow.completed, false);
+    assert.match(slow.steps[0].reason, /fps 22 below 30; p95 frame ms 60 above 25; spikes 4 above 0/);
+    profile = { sampled: 0, reason: 'DIRECTOR_PAUSED' };
+    assert.match((await run([{ do: 'frame_profile', budget: { minFps: 30 } }])).structuredContent.steps[0].reason, /no frames sampled: DIRECTOR_PAUSED/);
+    const tool = await client.callTool({ name: 'cocos_frame_profile', arguments: { budget: { minFps: 30 } } }) as any;
+    assert.equal(tool.structuredContent.budget.passed, false);
+    profile = { sampled: 60, fps: 60, frameMs: { avg: 16, p50: 16, p95: 17, max: 18 }, drawCalls: { min: 1, avg: 2, max: 3 }, spikes: 0 };
+    assert.equal(((await client.callTool({ name: 'cocos_frame_profile', arguments: { budget: { minFps: 30 } } })) as any).structuredContent.budget.passed, true);
+    assert.equal(((await client.callTool({ name: 'cocos_frame_profile', arguments: {} })) as any).structuredContent.budget, undefined);
+    for (const step of [{ do: 'frame_profile' }, { do: 'frame_profile', budget: { minFps: 0 } }, { do: 'advance_time', gameMs: 50 }, { do: 'advance_time', gameMs: 1_000, scale: 1 }, { do: 'assert_no_errors', ignore: '(' }, { do: 'repeat', times: 1, steps: [{ do: 'assert_no_errors' }] }]) {
+      assert.equal((await run([step])).isError, true, JSON.stringify(step));
+    }
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+  const off = await connect({});
+  try {
+    const denied = await off.run([{ do: 'assert_no_errors' }]);
+    assert.equal(denied.structuredContent.code, 'BROWSER_DATA_DISABLED');
+  } finally {
+    await Promise.allSettled([off.client.close(), off.server.close()]);
+  }
+});
+
+test('type step text is never echoed as the step target', async () => {
+  const page: any = {
+    url: () => 'http://localhost:3000',
+    evaluate: async (_fn: unknown, request: any) => { if (request?.action === 'findNode') return { matches: [] }; return 0; },
+  };
+  const server = createServer({ page: async () => page, close: async () => {} } as any, { allowRuntimeMutation: true });
+  const client = new Client({ name: 'self-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = await client.callTool({ name: 'cocos_run_steps', arguments: { steps: [{ do: 'type', path: '/Login/Password', text: 'hunter2-secret' }] } }) as any;
+    assert.doesNotMatch(JSON.stringify(result), /hunter2-secret/);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
+  }
+});
+
 test('cocos_run_steps is registered only with runtime mutation', async () => {
   const server = createServer({ page: async () => ({}), close: async () => {} } as any);
   const client = new Client({ name: 'self-test', version: '1.0.0' });
